@@ -285,6 +285,18 @@ func (f RedeemCodeFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, 
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.RedeemCodeMutation", m)
 }
 
+// The RiskSessionBlacklistFunc type is an adapter to allow the use of ordinary
+// function as RiskSessionBlacklist mutator.
+type RiskSessionBlacklistFunc func(context.Context, *ent.RiskSessionBlacklistMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f RiskSessionBlacklistFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.RiskSessionBlacklistMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.RiskSessionBlacklistMutation", m)
+}
+
 // The SecuritySecretFunc type is an adapter to allow the use of ordinary
 // function as SecuritySecret mutator.
 type SecuritySecretFunc func(context.Context, *ent.SecuritySecretMutation) (ent.Value, error)

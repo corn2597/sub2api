@@ -136,6 +136,19 @@ const (
 	SettingKeyAffiliateRebatePerInviteeCap     = "affiliate_rebate_per_invitee_cap"    // 单人返利上限（0=无上限）
 	SettingKeyRiskControlEnabled               = "risk_control_enabled"                // 是否启用风控中心入口与审计链路
 	SettingKeyContentModerationConfig          = "content_moderation_config"           // 内容审计配置（JSON）
+	SettingKeyRiskControlProvider              = "risk_control_provider"               // 风控 provider：legacy_moderation / openai_responses_session_audit
+	SettingKeyAuditBaseURL                     = "audit_base_url"                      // 外部审计 OpenAI-compatible Base URL
+	SettingKeyAuditPath                        = "audit_path"                          // 外部审计路径，默认 /v1/responses
+	SettingKeyAuditModel                       = "audit_model"                         // 外部审计模型
+	SettingKeyAuditAPIKeys                     = "audit_api_keys"                      // 外部审计 API Keys（JSON 数组或逗号/换行分隔）
+	SettingKeyAuditTimeoutMS                   = "audit_timeout_ms"                    // 外部审计超时（毫秒）
+	SettingKeyAuditFailClosed                  = "audit_fail_closed"                   // 审计错误时是否拒绝当前请求
+	SettingKeyAuditBlockConfidenceThreshold    = "audit_block_confidence_threshold"    // 触发 block 的最小置信度
+	SettingKeySessionAuditIntervalSeconds      = "session_audit_interval_seconds"      // 同 session 复审间隔（秒）
+	SettingKeySessionBlacklistTTLSeconds       = "session_blacklist_ttl_seconds"       // session 黑名单 TTL（秒，0=永久）
+	SettingKeySessionAuditEnabledProtocols     = "session_audit_enabled_protocols"     // 启用 session 审计的协议列表
+	SettingKeyAuditMaxInputChars               = "audit_max_input_chars"               // 发送给外部审计的最大字符数
+	SettingKeyAuditPromptTemplate              = "audit_prompt_template"               // 外部审计提示词模板
 	SettingKeyLoginAgreementEnabled            = "login_agreement_enabled"             // 登录前是否要求同意条款
 	SettingKeyLoginAgreementMode               = "login_agreement_mode"                // 条款确认展示模式：modal / checkbox
 	SettingKeyLoginAgreementUpdatedAt          = "login_agreement_updated_at"          // 条款更新日期（展示用）

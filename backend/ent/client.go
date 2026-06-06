@@ -38,6 +38,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/promocodeusage"
 	"github.com/Wei-Shaw/sub2api/ent/proxy"
 	"github.com/Wei-Shaw/sub2api/ent/redeemcode"
+	"github.com/Wei-Shaw/sub2api/ent/risksessionblacklist"
 	"github.com/Wei-Shaw/sub2api/ent/securitysecret"
 	"github.com/Wei-Shaw/sub2api/ent/setting"
 	"github.com/Wei-Shaw/sub2api/ent/subscriptionplan"
@@ -105,6 +106,8 @@ type Client struct {
 	Proxy *ProxyClient
 	// RedeemCode is the client for interacting with the RedeemCode builders.
 	RedeemCode *RedeemCodeClient
+	// RiskSessionBlacklist is the client for interacting with the RiskSessionBlacklist builders.
+	RiskSessionBlacklist *RiskSessionBlacklistClient
 	// SecuritySecret is the client for interacting with the SecuritySecret builders.
 	SecuritySecret *SecuritySecretClient
 	// Setting is the client for interacting with the Setting builders.
@@ -163,6 +166,7 @@ func (c *Client) init() {
 	c.PromoCodeUsage = NewPromoCodeUsageClient(c.config)
 	c.Proxy = NewProxyClient(c.config)
 	c.RedeemCode = NewRedeemCodeClient(c.config)
+	c.RiskSessionBlacklist = NewRiskSessionBlacklistClient(c.config)
 	c.SecuritySecret = NewSecuritySecretClient(c.config)
 	c.Setting = NewSettingClient(c.config)
 	c.SubscriptionPlan = NewSubscriptionPlanClient(c.config)
@@ -290,6 +294,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		PromoCodeUsage:                NewPromoCodeUsageClient(cfg),
 		Proxy:                         NewProxyClient(cfg),
 		RedeemCode:                    NewRedeemCodeClient(cfg),
+		RiskSessionBlacklist:          NewRiskSessionBlacklistClient(cfg),
 		SecuritySecret:                NewSecuritySecretClient(cfg),
 		Setting:                       NewSettingClient(cfg),
 		SubscriptionPlan:              NewSubscriptionPlanClient(cfg),
@@ -344,6 +349,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		PromoCodeUsage:                NewPromoCodeUsageClient(cfg),
 		Proxy:                         NewProxyClient(cfg),
 		RedeemCode:                    NewRedeemCodeClient(cfg),
+		RiskSessionBlacklist:          NewRiskSessionBlacklistClient(cfg),
 		SecuritySecret:                NewSecuritySecretClient(cfg),
 		Setting:                       NewSettingClient(cfg),
 		SubscriptionPlan:              NewSubscriptionPlanClient(cfg),
@@ -391,10 +397,11 @@ func (c *Client) Use(hooks ...Hook) {
 		c.ChannelMonitorRequestTemplate, c.ErrorPassthroughRule, c.Group,
 		c.IdempotencyRecord, c.IdentityAdoptionDecision, c.PaymentAuditLog,
 		c.PaymentOrder, c.PaymentProviderInstance, c.PendingAuthSession, c.PromoCode,
-		c.PromoCodeUsage, c.Proxy, c.RedeemCode, c.SecuritySecret, c.Setting,
-		c.SubscriptionPlan, c.TLSFingerprintProfile, c.UsageCleanupTask, c.UsageLog,
-		c.User, c.UserAllowedGroup, c.UserAttributeDefinition, c.UserAttributeValue,
-		c.UserPlatformQuota, c.UserSubscription,
+		c.PromoCodeUsage, c.Proxy, c.RedeemCode, c.RiskSessionBlacklist,
+		c.SecuritySecret, c.Setting, c.SubscriptionPlan, c.TLSFingerprintProfile,
+		c.UsageCleanupTask, c.UsageLog, c.User, c.UserAllowedGroup,
+		c.UserAttributeDefinition, c.UserAttributeValue, c.UserPlatformQuota,
+		c.UserSubscription,
 	} {
 		n.Use(hooks...)
 	}
@@ -410,10 +417,11 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 		c.ChannelMonitorRequestTemplate, c.ErrorPassthroughRule, c.Group,
 		c.IdempotencyRecord, c.IdentityAdoptionDecision, c.PaymentAuditLog,
 		c.PaymentOrder, c.PaymentProviderInstance, c.PendingAuthSession, c.PromoCode,
-		c.PromoCodeUsage, c.Proxy, c.RedeemCode, c.SecuritySecret, c.Setting,
-		c.SubscriptionPlan, c.TLSFingerprintProfile, c.UsageCleanupTask, c.UsageLog,
-		c.User, c.UserAllowedGroup, c.UserAttributeDefinition, c.UserAttributeValue,
-		c.UserPlatformQuota, c.UserSubscription,
+		c.PromoCodeUsage, c.Proxy, c.RedeemCode, c.RiskSessionBlacklist,
+		c.SecuritySecret, c.Setting, c.SubscriptionPlan, c.TLSFingerprintProfile,
+		c.UsageCleanupTask, c.UsageLog, c.User, c.UserAllowedGroup,
+		c.UserAttributeDefinition, c.UserAttributeValue, c.UserPlatformQuota,
+		c.UserSubscription,
 	} {
 		n.Intercept(interceptors...)
 	}
@@ -468,6 +476,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.Proxy.mutate(ctx, m)
 	case *RedeemCodeMutation:
 		return c.RedeemCode.mutate(ctx, m)
+	case *RiskSessionBlacklistMutation:
+		return c.RiskSessionBlacklist.mutate(ctx, m)
 	case *SecuritySecretMutation:
 		return c.SecuritySecret.mutate(ctx, m)
 	case *SettingMutation:
@@ -4171,6 +4181,139 @@ func (c *RedeemCodeClient) mutate(ctx context.Context, m *RedeemCodeMutation) (V
 	}
 }
 
+// RiskSessionBlacklistClient is a client for the RiskSessionBlacklist schema.
+type RiskSessionBlacklistClient struct {
+	config
+}
+
+// NewRiskSessionBlacklistClient returns a client for the RiskSessionBlacklist from the given config.
+func NewRiskSessionBlacklistClient(c config) *RiskSessionBlacklistClient {
+	return &RiskSessionBlacklistClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `risksessionblacklist.Hooks(f(g(h())))`.
+func (c *RiskSessionBlacklistClient) Use(hooks ...Hook) {
+	c.hooks.RiskSessionBlacklist = append(c.hooks.RiskSessionBlacklist, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `risksessionblacklist.Intercept(f(g(h())))`.
+func (c *RiskSessionBlacklistClient) Intercept(interceptors ...Interceptor) {
+	c.inters.RiskSessionBlacklist = append(c.inters.RiskSessionBlacklist, interceptors...)
+}
+
+// Create returns a builder for creating a RiskSessionBlacklist entity.
+func (c *RiskSessionBlacklistClient) Create() *RiskSessionBlacklistCreate {
+	mutation := newRiskSessionBlacklistMutation(c.config, OpCreate)
+	return &RiskSessionBlacklistCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of RiskSessionBlacklist entities.
+func (c *RiskSessionBlacklistClient) CreateBulk(builders ...*RiskSessionBlacklistCreate) *RiskSessionBlacklistCreateBulk {
+	return &RiskSessionBlacklistCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *RiskSessionBlacklistClient) MapCreateBulk(slice any, setFunc func(*RiskSessionBlacklistCreate, int)) *RiskSessionBlacklistCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &RiskSessionBlacklistCreateBulk{err: fmt.Errorf("calling to RiskSessionBlacklistClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*RiskSessionBlacklistCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &RiskSessionBlacklistCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for RiskSessionBlacklist.
+func (c *RiskSessionBlacklistClient) Update() *RiskSessionBlacklistUpdate {
+	mutation := newRiskSessionBlacklistMutation(c.config, OpUpdate)
+	return &RiskSessionBlacklistUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *RiskSessionBlacklistClient) UpdateOne(_m *RiskSessionBlacklist) *RiskSessionBlacklistUpdateOne {
+	mutation := newRiskSessionBlacklistMutation(c.config, OpUpdateOne, withRiskSessionBlacklist(_m))
+	return &RiskSessionBlacklistUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *RiskSessionBlacklistClient) UpdateOneID(id int64) *RiskSessionBlacklistUpdateOne {
+	mutation := newRiskSessionBlacklistMutation(c.config, OpUpdateOne, withRiskSessionBlacklistID(id))
+	return &RiskSessionBlacklistUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for RiskSessionBlacklist.
+func (c *RiskSessionBlacklistClient) Delete() *RiskSessionBlacklistDelete {
+	mutation := newRiskSessionBlacklistMutation(c.config, OpDelete)
+	return &RiskSessionBlacklistDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *RiskSessionBlacklistClient) DeleteOne(_m *RiskSessionBlacklist) *RiskSessionBlacklistDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *RiskSessionBlacklistClient) DeleteOneID(id int64) *RiskSessionBlacklistDeleteOne {
+	builder := c.Delete().Where(risksessionblacklist.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &RiskSessionBlacklistDeleteOne{builder}
+}
+
+// Query returns a query builder for RiskSessionBlacklist.
+func (c *RiskSessionBlacklistClient) Query() *RiskSessionBlacklistQuery {
+	return &RiskSessionBlacklistQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeRiskSessionBlacklist},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a RiskSessionBlacklist entity by its id.
+func (c *RiskSessionBlacklistClient) Get(ctx context.Context, id int64) (*RiskSessionBlacklist, error) {
+	return c.Query().Where(risksessionblacklist.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *RiskSessionBlacklistClient) GetX(ctx context.Context, id int64) *RiskSessionBlacklist {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *RiskSessionBlacklistClient) Hooks() []Hook {
+	return c.hooks.RiskSessionBlacklist
+}
+
+// Interceptors returns the client interceptors.
+func (c *RiskSessionBlacklistClient) Interceptors() []Interceptor {
+	return c.inters.RiskSessionBlacklist
+}
+
+func (c *RiskSessionBlacklistClient) mutate(ctx context.Context, m *RiskSessionBlacklistMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&RiskSessionBlacklistCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&RiskSessionBlacklistUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&RiskSessionBlacklistUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&RiskSessionBlacklistDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown RiskSessionBlacklist mutation op: %q", m.Op())
+	}
+}
+
 // SecuritySecretClient is a client for the SecuritySecret schema.
 type SecuritySecretClient struct {
 	config
@@ -6198,10 +6341,10 @@ type (
 		ChannelMonitorHistory, ChannelMonitorRequestTemplate, ErrorPassthroughRule,
 		Group, IdempotencyRecord, IdentityAdoptionDecision, PaymentAuditLog,
 		PaymentOrder, PaymentProviderInstance, PendingAuthSession, PromoCode,
-		PromoCodeUsage, Proxy, RedeemCode, SecuritySecret, Setting, SubscriptionPlan,
-		TLSFingerprintProfile, UsageCleanupTask, UsageLog, User, UserAllowedGroup,
-		UserAttributeDefinition, UserAttributeValue, UserPlatformQuota,
-		UserSubscription []ent.Hook
+		PromoCodeUsage, Proxy, RedeemCode, RiskSessionBlacklist, SecuritySecret,
+		Setting, SubscriptionPlan, TLSFingerprintProfile, UsageCleanupTask, UsageLog,
+		User, UserAllowedGroup, UserAttributeDefinition, UserAttributeValue,
+		UserPlatformQuota, UserSubscription []ent.Hook
 	}
 	inters struct {
 		APIKey, Account, AccountGroup, Announcement, AnnouncementRead, AuthIdentity,
@@ -6209,10 +6352,10 @@ type (
 		ChannelMonitorHistory, ChannelMonitorRequestTemplate, ErrorPassthroughRule,
 		Group, IdempotencyRecord, IdentityAdoptionDecision, PaymentAuditLog,
 		PaymentOrder, PaymentProviderInstance, PendingAuthSession, PromoCode,
-		PromoCodeUsage, Proxy, RedeemCode, SecuritySecret, Setting, SubscriptionPlan,
-		TLSFingerprintProfile, UsageCleanupTask, UsageLog, User, UserAllowedGroup,
-		UserAttributeDefinition, UserAttributeValue, UserPlatformQuota,
-		UserSubscription []ent.Interceptor
+		PromoCodeUsage, Proxy, RedeemCode, RiskSessionBlacklist, SecuritySecret,
+		Setting, SubscriptionPlan, TLSFingerprintProfile, UsageCleanupTask, UsageLog,
+		User, UserAllowedGroup, UserAttributeDefinition, UserAttributeValue,
+		UserPlatformQuota, UserSubscription []ent.Interceptor
 	}
 )
 

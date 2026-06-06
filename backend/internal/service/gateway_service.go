@@ -723,65 +723,7 @@ func NewGatewayService(
 
 // GenerateSessionHash 从预解析请求计算粘性会话 hash
 func (s *GatewayService) GenerateSessionHash(parsed *ParsedRequest) string {
-	if parsed == nil {
-		return ""
-	}
-
-	// 1. 最高优先级：从 metadata.user_id 提取 session_xxx
-	if parsed.MetadataUserID != "" {
-		uid := ParseMetadataUserID(parsed.MetadataUserID)
-		if uid != nil && uid.SessionID != "" {
-			slog.Info("sticky.hash_source",
-				"source", "metadata_user_id",
-				"session_id", uid.SessionID,
-				"device_id", uid.DeviceID,
-				"is_new_format", uid.IsNewFormat,
-			)
-			return uid.SessionID
-		}
-		slog.Info("sticky.hash_metadata_parse_failed",
-			"metadata_user_id", parsed.MetadataUserID,
-			"parsed_nil", uid == nil,
-		)
-	}
-
-	// 2. 提取带 cache_control: {type: "ephemeral"} 的内容
-	cacheableContent := s.extractCacheableContent(parsed)
-	if cacheableContent != "" {
-		hash := s.hashContent(cacheableContent)
-		slog.Info("sticky.hash_source",
-			"source", "cacheable_content",
-			"hash", hash,
-		)
-		return hash
-	}
-
-	// 3. 最后 fallback: 使用 session上下文 + system + 所有消息的完整摘要串
-	var combined strings.Builder
-	// 混入请求上下文区分因子，避免不同用户相同消息产生相同 hash
-	if parsed.SessionContext != nil {
-		_, _ = combined.WriteString(parsed.SessionContext.ClientIP)
-		_, _ = combined.WriteString(":")
-		_, _ = combined.WriteString(NormalizeSessionUserAgent(parsed.SessionContext.UserAgent))
-		_, _ = combined.WriteString(":")
-		_, _ = combined.WriteString(strconv.FormatInt(parsed.SessionContext.APIKeyID, 10))
-		_, _ = combined.WriteString("|")
-	}
-	if systemText := extractTextFromSystemRaw(parsed.SystemRaw()); systemText != "" {
-		_, _ = combined.WriteString(systemText)
-	}
-	appendMessageTextsFromRaw(&combined, parsed.MessagesRaw())
-	if combined.Len() > 0 {
-		hash := s.hashContent(combined.String())
-		slog.Info("sticky.hash_source",
-			"source", "message_content_fallback",
-			"hash", hash,
-			"content_len", combined.Len(),
-		)
-		return hash
-	}
-
-	return ""
+	return generateGatewayRequestSessionSeed(parsed)
 }
 
 // BindStickySession sets session -> account binding with standard TTL.

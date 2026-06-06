@@ -300,6 +300,9 @@ type ContentModerationCheckInput struct {
 	Model      string
 	Protocol   string
 	Body       []byte
+	Headers    http.Header
+	ClientIP   string
+	UserAgent  string
 }
 
 type ContentModerationInput struct {
@@ -463,6 +466,10 @@ type ContentModerationRepository interface {
 	ListLogs(ctx context.Context, filter ContentModerationLogFilter) ([]ContentModerationLog, *pagination.PaginationResult, error)
 	CountFlaggedByUserSince(ctx context.Context, userID int64, since time.Time) (int, error)
 	CleanupExpiredLogs(ctx context.Context, hitBefore time.Time, nonHitBefore time.Time) (*ContentModerationCleanupResult, error)
+	GetRiskSessionBlacklist(ctx context.Context, sessionHash string) (*RiskSessionBlacklist, error)
+	UpsertRiskSessionBlacklist(ctx context.Context, entry *RiskSessionBlacklist) error
+	TouchRiskSessionBlacklist(ctx context.Context, sessionHash string, lastSeenAt time.Time) error
+	DeleteRiskSessionBlacklist(ctx context.Context, sessionHash string) error
 }
 
 type ContentModerationHashCache interface {
@@ -471,6 +478,16 @@ type ContentModerationHashCache interface {
 	DeleteFlaggedInputHash(ctx context.Context, inputHash string) (bool, error)
 	ClearFlaggedInputHashes(ctx context.Context) (int64, error)
 	CountFlaggedInputHashes(ctx context.Context) (int64, error)
+	GetRiskSessionLastSuccessAudit(ctx context.Context, sessionHash string) (*time.Time, error)
+	SetRiskSessionLastSuccessAudit(ctx context.Context, sessionHash string, at time.Time, ttl time.Duration) error
+	GetRiskSessionLastAttempt(ctx context.Context, sessionHash string) (*time.Time, error)
+	SetRiskSessionLastAttempt(ctx context.Context, sessionHash string, at time.Time, ttl time.Duration) error
+	AcquireRiskSessionAuditLock(ctx context.Context, sessionHash string, token string, ttl time.Duration) (bool, error)
+	HasRiskSessionAuditLock(ctx context.Context, sessionHash string) (bool, error)
+	ReleaseRiskSessionAuditLock(ctx context.Context, sessionHash string, token string) error
+	GetRiskSessionBlacklistCache(ctx context.Context, sessionHash string) (*RiskSessionBlacklistCacheEntry, error)
+	SetRiskSessionBlacklistCache(ctx context.Context, sessionHash string, entry *RiskSessionBlacklistCacheEntry, ttl time.Duration) error
+	DeleteRiskSessionBlacklistCache(ctx context.Context, sessionHash string) error
 }
 
 type ContentModerationService struct {
@@ -501,6 +518,9 @@ type ContentModerationService struct {
 	lastCleanupDeletedNonHit atomic.Int64
 	keyHealthMu              sync.Mutex
 	keyHealth                map[string]*contentModerationKeyHealth
+	sessionAuditClient       SessionAuditClient
+	now                      func() time.Time
+	sleep                    func(context.Context, time.Duration) error
 }
 
 type contentModerationTask struct {
@@ -553,7 +573,10 @@ func NewContentModerationService(
 		workerCount:          maxContentModerationWorkerCount,
 		asyncQueue:           make(chan contentModerationTask, maxContentModerationQueueSize),
 		keyHealth:            make(map[string]*contentModerationKeyHealth),
+		now:                  time.Now,
+		sleep:                contentModerationSleepWithContext,
 	}
+	svc.sessionAuditClient = NewOpenAIResponsesAuditClient(svc.httpClient)
 	if settingRepo != nil && repo != nil {
 		for i := 0; i < svc.workerCount; i++ {
 			go svc.worker(i)
@@ -845,6 +868,20 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 			"model_filter_type", cfg.ModelFilter.Type,
 			"configured_models", cfg.ModelFilter.Models)
 		return allow, nil
+	}
+	sessionAuditCfg, sessionAuditErr := s.loadSessionAuditProviderConfig(ctx)
+	if sessionAuditErr != nil {
+		slog.Warn("content_moderation.session_audit_config_load_failed",
+			"user_id", input.UserID,
+			"api_key_id", input.APIKeyID,
+			"group_id", contentModerationLogGroupID(input.GroupID),
+			"endpoint", input.Endpoint,
+			"protocol", input.Protocol,
+			"error", sessionAuditErr)
+		sessionAuditCfg = defaultSessionAuditProviderConfig()
+	}
+	if sessionAuditCfg != nil && sessionAuditCfg.UsesSessionAuditForProtocol(input.Protocol) {
+		return s.checkSessionAudit(ctx, input, cfg, sessionAuditCfg), nil
 	}
 	content := ExtractContentModerationInput(input.Protocol, input.Body)
 	if content.IsEmpty() {

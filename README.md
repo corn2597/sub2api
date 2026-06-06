@@ -46,6 +46,56 @@ Sub2API is an AI API gateway platform designed to distribute and manage API quot
 - **Admin Dashboard** - Web interface for monitoring and management
 - **External System Integration** - Embed external systems (e.g. ticketing) via iframe to extend the admin dashboard
 
+## Claude Session Audit Risk Control
+
+When `risk_control_provider=openai_responses_session_audit`, Claude / Anthropic `POST /v1/messages` traffic can be synchronously audited through an external OpenAI-compatible `POST /v1/responses` endpoint before account selection, billing, and forwarding.
+
+Only a redacted and truncated payload is sent to the external audit service:
+
+- `session_hash` only, never the raw `session_id`
+- User / API key / group identifiers
+- Endpoint, protocol, model, message summary, tools, and metadata
+- Authorization, API keys, cookies, tokens, and other secret-like strings are redacted
+
+Recommended settings:
+
+```ini
+risk_control_enabled=true
+risk_control_provider=openai_responses_session_audit
+audit_base_url=https://api.openai.com
+audit_path=/v1/responses
+audit_model=gpt-5-mini
+audit_api_keys=["sk-REPLACE_ME"]
+audit_timeout_ms=3000
+audit_fail_closed=false
+audit_block_confidence_threshold=0.7
+session_audit_interval_seconds=300
+session_blacklist_ttl_seconds=0
+session_audit_enabled_protocols=["anthropic_messages"]
+audit_max_input_chars=12000
+```
+
+Behavior notes:
+
+- New sessions are always audited on first sight.
+- Allowed sessions are skipped for the next 5 minutes by default.
+- Blocked sessions are persisted and later requests are rejected immediately without calling the audit API again.
+- If you pass the `session_id` header through Nginx, enable `underscores_in_headers on;`.
+- Do not commit real `audit_api_keys`.
+
+Online smoke test for an audit relay:
+
+```powershell
+$env:SUB2API_AUDIT_TEST_BASE_URL="https://YOUR-AUDIT-RELAY"
+$env:SUB2API_AUDIT_TEST_API_KEY="TEMPORARY-KEY"
+$env:SUB2API_AUDIT_TEST_MODEL="YOUR-AUDIT-MODEL"
+$env:SUB2API_AUDIT_TEST_PATH="/v1/responses"
+go test ./internal/service -run TestOpenAIResponsesAuditClient_OnlineSmoke -count=1 -v
+Remove-Item Env:SUB2API_AUDIT_TEST_API_KEY
+```
+
+Use a temporary or revocable key. The smoke test calls the real OpenAI-compatible `POST /v1/responses` endpoint with one benign payload and one clearly policy-violating payload, without writing the key into the repository.
+
 ## ❤️ Sponsors
 
 > [Want to appear here?](mailto:support@pincc.ai)

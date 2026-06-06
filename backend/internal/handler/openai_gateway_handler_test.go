@@ -741,8 +741,9 @@ func (r *contentModerationHandlerSettingRepo) Delete(ctx context.Context, key st
 }
 
 type contentModerationHandlerTestRepo struct {
-	mu   sync.Mutex
-	logs []service.ContentModerationLog
+	mu         sync.Mutex
+	logs       []service.ContentModerationLog
+	blacklists map[string]service.RiskSessionBlacklist
 }
 
 func (r *contentModerationHandlerTestRepo) CreateLog(ctx context.Context, log *service.ContentModerationLog) error {
@@ -776,6 +777,70 @@ func (r *contentModerationHandlerTestRepo) CountFlaggedByUserSince(ctx context.C
 
 func (r *contentModerationHandlerTestRepo) CleanupExpiredLogs(ctx context.Context, hitBefore time.Time, nonHitBefore time.Time) (*service.ContentModerationCleanupResult, error) {
 	return &service.ContentModerationCleanupResult{}, nil
+}
+
+func (r *contentModerationHandlerTestRepo) GetRiskSessionBlacklist(ctx context.Context, sessionHash string) (*service.RiskSessionBlacklist, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.blacklists == nil {
+		return nil, nil
+	}
+	entry, ok := r.blacklists[sessionHash]
+	if !ok {
+		return nil, nil
+	}
+	clone := entry
+	clone.Categories = append([]string(nil), entry.Categories...)
+	clone.ExpiresAt = cloneHandlerTimePtr(entry.ExpiresAt)
+	return &clone, nil
+}
+
+func (r *contentModerationHandlerTestRepo) UpsertRiskSessionBlacklist(ctx context.Context, entry *service.RiskSessionBlacklist) error {
+	if entry == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.blacklists == nil {
+		r.blacklists = map[string]service.RiskSessionBlacklist{}
+	}
+	clone := *entry
+	clone.Categories = append([]string(nil), entry.Categories...)
+	clone.ExpiresAt = cloneHandlerTimePtr(entry.ExpiresAt)
+	r.blacklists[entry.SessionHash] = clone
+	return nil
+}
+
+func (r *contentModerationHandlerTestRepo) TouchRiskSessionBlacklist(ctx context.Context, sessionHash string, lastSeenAt time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.blacklists == nil {
+		return nil
+	}
+	entry, ok := r.blacklists[sessionHash]
+	if !ok {
+		return nil
+	}
+	entry.LastSeenAt = lastSeenAt
+	r.blacklists[sessionHash] = entry
+	return nil
+}
+
+func (r *contentModerationHandlerTestRepo) DeleteRiskSessionBlacklist(ctx context.Context, sessionHash string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.blacklists != nil {
+		delete(r.blacklists, sessionHash)
+	}
+	return nil
+}
+
+func cloneHandlerTimePtr(in *time.Time) *time.Time {
+	if in == nil {
+		return nil
+	}
+	v := in.UTC()
+	return &v
 }
 
 func TestOpenAIResponsesWebSocket_ContentModerationBlocksFirstFrame(t *testing.T) {

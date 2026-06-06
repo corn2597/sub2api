@@ -1180,6 +1180,64 @@ var (
 			},
 		},
 	}
+	// RiskSessionBlacklistsColumns holds the columns for the "risk_session_blacklists" table.
+	RiskSessionBlacklistsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeInt64, Increment: true},
+		{Name: "created_at", Type: field.TypeTime, SchemaType: map[string]string{"postgres": "timestamptz"}},
+		{Name: "updated_at", Type: field.TypeTime, SchemaType: map[string]string{"postgres": "timestamptz"}},
+		{Name: "session_hash", Type: field.TypeString},
+		{Name: "user_id", Type: field.TypeInt64, Nullable: true},
+		{Name: "api_key_id", Type: field.TypeInt64, Nullable: true},
+		{Name: "group_id", Type: field.TypeInt64, Nullable: true},
+		{Name: "reason", Type: field.TypeString, Size: 2147483647, Default: ""},
+		{Name: "categories", Type: field.TypeJSON, Nullable: true, SchemaType: map[string]string{"postgres": "jsonb"}},
+		{Name: "confidence", Type: field.TypeFloat64, Default: 0},
+		{Name: "audit_model", Type: field.TypeString, Default: ""},
+		{Name: "audit_response_id", Type: field.TypeString, Default: ""},
+		{Name: "source_protocol", Type: field.TypeString, Default: ""},
+		{Name: "source_model", Type: field.TypeString, Default: ""},
+		{Name: "first_blocked_at", Type: field.TypeTime, SchemaType: map[string]string{"postgres": "timestamptz"}},
+		{Name: "last_seen_at", Type: field.TypeTime, SchemaType: map[string]string{"postgres": "timestamptz"}},
+		{Name: "expires_at", Type: field.TypeTime, Nullable: true, SchemaType: map[string]string{"postgres": "timestamptz"}},
+	}
+	// RiskSessionBlacklistsTable holds the schema information for the "risk_session_blacklists" table.
+	RiskSessionBlacklistsTable = &schema.Table{
+		Name:       "risk_session_blacklists",
+		Columns:    RiskSessionBlacklistsColumns,
+		PrimaryKey: []*schema.Column{RiskSessionBlacklistsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "risksessionblacklist_session_hash",
+				Unique:  true,
+				Columns: []*schema.Column{RiskSessionBlacklistsColumns[3]},
+			},
+			{
+				Name:    "risksessionblacklist_user_id",
+				Unique:  false,
+				Columns: []*schema.Column{RiskSessionBlacklistsColumns[4]},
+			},
+			{
+				Name:    "risksessionblacklist_api_key_id",
+				Unique:  false,
+				Columns: []*schema.Column{RiskSessionBlacklistsColumns[5]},
+			},
+			{
+				Name:    "risksessionblacklist_group_id",
+				Unique:  false,
+				Columns: []*schema.Column{RiskSessionBlacklistsColumns[6]},
+			},
+			{
+				Name:    "risksessionblacklist_expires_at",
+				Unique:  false,
+				Columns: []*schema.Column{RiskSessionBlacklistsColumns[16]},
+			},
+			{
+				Name:    "risksessionblacklist_last_seen_at",
+				Unique:  false,
+				Columns: []*schema.Column{RiskSessionBlacklistsColumns[15]},
+			},
+		},
+	}
 	// SecuritySecretsColumns holds the columns for the "security_secrets" table.
 	SecuritySecretsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeInt64, Increment: true},
@@ -1774,6 +1832,7 @@ var (
 		PromoCodeUsagesTable,
 		ProxiesTable,
 		RedeemCodesTable,
+		RiskSessionBlacklistsTable,
 		SecuritySecretsTable,
 		SettingsTable,
 		SubscriptionPlansTable,
@@ -1878,6 +1937,9 @@ func init() {
 	RedeemCodesTable.ForeignKeys[1].RefTable = UsersTable
 	RedeemCodesTable.Annotation = &entsql.Annotation{
 		Table: "redeem_codes",
+	}
+	RiskSessionBlacklistsTable.Annotation = &entsql.Annotation{
+		Table: "risk_session_blacklists",
 	}
 	SecuritySecretsTable.Annotation = &entsql.Annotation{
 		Table: "security_secrets",

@@ -36,6 +36,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/promocodeusage"
 	"github.com/Wei-Shaw/sub2api/ent/proxy"
 	"github.com/Wei-Shaw/sub2api/ent/redeemcode"
+	"github.com/Wei-Shaw/sub2api/ent/risksessionblacklist"
 	"github.com/Wei-Shaw/sub2api/ent/securitysecret"
 	"github.com/Wei-Shaw/sub2api/ent/setting"
 	"github.com/Wei-Shaw/sub2api/ent/subscriptionplan"
@@ -83,6 +84,7 @@ const (
 	TypePromoCodeUsage                = "PromoCodeUsage"
 	TypeProxy                         = "Proxy"
 	TypeRedeemCode                    = "RedeemCode"
+	TypeRiskSessionBlacklist          = "RiskSessionBlacklist"
 	TypeSecuritySecret                = "SecuritySecret"
 	TypeSetting                       = "Setting"
 	TypeSubscriptionPlan              = "SubscriptionPlan"
@@ -29896,6 +29898,1395 @@ func (m *RedeemCodeMutation) ResetEdge(name string) error {
 		return nil
 	}
 	return fmt.Errorf("unknown RedeemCode edge %s", name)
+}
+
+// RiskSessionBlacklistMutation represents an operation that mutates the RiskSessionBlacklist nodes in the graph.
+type RiskSessionBlacklistMutation struct {
+	config
+	op                Op
+	typ               string
+	id                *int64
+	created_at        *time.Time
+	updated_at        *time.Time
+	session_hash      *string
+	user_id           *int64
+	adduser_id        *int64
+	api_key_id        *int64
+	addapi_key_id     *int64
+	group_id          *int64
+	addgroup_id       *int64
+	reason            *string
+	categories        *[]string
+	appendcategories  []string
+	confidence        *float64
+	addconfidence     *float64
+	audit_model       *string
+	audit_response_id *string
+	source_protocol   *string
+	source_model      *string
+	first_blocked_at  *time.Time
+	last_seen_at      *time.Time
+	expires_at        *time.Time
+	clearedFields     map[string]struct{}
+	done              bool
+	oldValue          func(context.Context) (*RiskSessionBlacklist, error)
+	predicates        []predicate.RiskSessionBlacklist
+}
+
+var _ ent.Mutation = (*RiskSessionBlacklistMutation)(nil)
+
+// risksessionblacklistOption allows management of the mutation configuration using functional options.
+type risksessionblacklistOption func(*RiskSessionBlacklistMutation)
+
+// newRiskSessionBlacklistMutation creates new mutation for the RiskSessionBlacklist entity.
+func newRiskSessionBlacklistMutation(c config, op Op, opts ...risksessionblacklistOption) *RiskSessionBlacklistMutation {
+	m := &RiskSessionBlacklistMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeRiskSessionBlacklist,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withRiskSessionBlacklistID sets the ID field of the mutation.
+func withRiskSessionBlacklistID(id int64) risksessionblacklistOption {
+	return func(m *RiskSessionBlacklistMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *RiskSessionBlacklist
+		)
+		m.oldValue = func(ctx context.Context) (*RiskSessionBlacklist, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().RiskSessionBlacklist.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withRiskSessionBlacklist sets the old RiskSessionBlacklist of the mutation.
+func withRiskSessionBlacklist(node *RiskSessionBlacklist) risksessionblacklistOption {
+	return func(m *RiskSessionBlacklistMutation) {
+		m.oldValue = func(context.Context) (*RiskSessionBlacklist, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m RiskSessionBlacklistMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m RiskSessionBlacklistMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *RiskSessionBlacklistMutation) ID() (id int64, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *RiskSessionBlacklistMutation) IDs(ctx context.Context) ([]int64, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []int64{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().RiskSessionBlacklist.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetCreatedAt sets the "created_at" field.
+func (m *RiskSessionBlacklistMutation) SetCreatedAt(t time.Time) {
+	m.created_at = &t
+}
+
+// CreatedAt returns the value of the "created_at" field in the mutation.
+func (m *RiskSessionBlacklistMutation) CreatedAt() (r time.Time, exists bool) {
+	v := m.created_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedAt returns the old "created_at" field's value of the RiskSessionBlacklist entity.
+// If the RiskSessionBlacklist object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RiskSessionBlacklistMutation) OldCreatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedAt: %w", err)
+	}
+	return oldValue.CreatedAt, nil
+}
+
+// ResetCreatedAt resets all changes to the "created_at" field.
+func (m *RiskSessionBlacklistMutation) ResetCreatedAt() {
+	m.created_at = nil
+}
+
+// SetUpdatedAt sets the "updated_at" field.
+func (m *RiskSessionBlacklistMutation) SetUpdatedAt(t time.Time) {
+	m.updated_at = &t
+}
+
+// UpdatedAt returns the value of the "updated_at" field in the mutation.
+func (m *RiskSessionBlacklistMutation) UpdatedAt() (r time.Time, exists bool) {
+	v := m.updated_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUpdatedAt returns the old "updated_at" field's value of the RiskSessionBlacklist entity.
+// If the RiskSessionBlacklist object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RiskSessionBlacklistMutation) OldUpdatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUpdatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUpdatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUpdatedAt: %w", err)
+	}
+	return oldValue.UpdatedAt, nil
+}
+
+// ResetUpdatedAt resets all changes to the "updated_at" field.
+func (m *RiskSessionBlacklistMutation) ResetUpdatedAt() {
+	m.updated_at = nil
+}
+
+// SetSessionHash sets the "session_hash" field.
+func (m *RiskSessionBlacklistMutation) SetSessionHash(s string) {
+	m.session_hash = &s
+}
+
+// SessionHash returns the value of the "session_hash" field in the mutation.
+func (m *RiskSessionBlacklistMutation) SessionHash() (r string, exists bool) {
+	v := m.session_hash
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSessionHash returns the old "session_hash" field's value of the RiskSessionBlacklist entity.
+// If the RiskSessionBlacklist object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RiskSessionBlacklistMutation) OldSessionHash(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSessionHash is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSessionHash requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSessionHash: %w", err)
+	}
+	return oldValue.SessionHash, nil
+}
+
+// ResetSessionHash resets all changes to the "session_hash" field.
+func (m *RiskSessionBlacklistMutation) ResetSessionHash() {
+	m.session_hash = nil
+}
+
+// SetUserID sets the "user_id" field.
+func (m *RiskSessionBlacklistMutation) SetUserID(i int64) {
+	m.user_id = &i
+	m.adduser_id = nil
+}
+
+// UserID returns the value of the "user_id" field in the mutation.
+func (m *RiskSessionBlacklistMutation) UserID() (r int64, exists bool) {
+	v := m.user_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUserID returns the old "user_id" field's value of the RiskSessionBlacklist entity.
+// If the RiskSessionBlacklist object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RiskSessionBlacklistMutation) OldUserID(ctx context.Context) (v *int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUserID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUserID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUserID: %w", err)
+	}
+	return oldValue.UserID, nil
+}
+
+// AddUserID adds i to the "user_id" field.
+func (m *RiskSessionBlacklistMutation) AddUserID(i int64) {
+	if m.adduser_id != nil {
+		*m.adduser_id += i
+	} else {
+		m.adduser_id = &i
+	}
+}
+
+// AddedUserID returns the value that was added to the "user_id" field in this mutation.
+func (m *RiskSessionBlacklistMutation) AddedUserID() (r int64, exists bool) {
+	v := m.adduser_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ClearUserID clears the value of the "user_id" field.
+func (m *RiskSessionBlacklistMutation) ClearUserID() {
+	m.user_id = nil
+	m.adduser_id = nil
+	m.clearedFields[risksessionblacklist.FieldUserID] = struct{}{}
+}
+
+// UserIDCleared returns if the "user_id" field was cleared in this mutation.
+func (m *RiskSessionBlacklistMutation) UserIDCleared() bool {
+	_, ok := m.clearedFields[risksessionblacklist.FieldUserID]
+	return ok
+}
+
+// ResetUserID resets all changes to the "user_id" field.
+func (m *RiskSessionBlacklistMutation) ResetUserID() {
+	m.user_id = nil
+	m.adduser_id = nil
+	delete(m.clearedFields, risksessionblacklist.FieldUserID)
+}
+
+// SetAPIKeyID sets the "api_key_id" field.
+func (m *RiskSessionBlacklistMutation) SetAPIKeyID(i int64) {
+	m.api_key_id = &i
+	m.addapi_key_id = nil
+}
+
+// APIKeyID returns the value of the "api_key_id" field in the mutation.
+func (m *RiskSessionBlacklistMutation) APIKeyID() (r int64, exists bool) {
+	v := m.api_key_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAPIKeyID returns the old "api_key_id" field's value of the RiskSessionBlacklist entity.
+// If the RiskSessionBlacklist object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RiskSessionBlacklistMutation) OldAPIKeyID(ctx context.Context) (v *int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAPIKeyID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAPIKeyID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAPIKeyID: %w", err)
+	}
+	return oldValue.APIKeyID, nil
+}
+
+// AddAPIKeyID adds i to the "api_key_id" field.
+func (m *RiskSessionBlacklistMutation) AddAPIKeyID(i int64) {
+	if m.addapi_key_id != nil {
+		*m.addapi_key_id += i
+	} else {
+		m.addapi_key_id = &i
+	}
+}
+
+// AddedAPIKeyID returns the value that was added to the "api_key_id" field in this mutation.
+func (m *RiskSessionBlacklistMutation) AddedAPIKeyID() (r int64, exists bool) {
+	v := m.addapi_key_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ClearAPIKeyID clears the value of the "api_key_id" field.
+func (m *RiskSessionBlacklistMutation) ClearAPIKeyID() {
+	m.api_key_id = nil
+	m.addapi_key_id = nil
+	m.clearedFields[risksessionblacklist.FieldAPIKeyID] = struct{}{}
+}
+
+// APIKeyIDCleared returns if the "api_key_id" field was cleared in this mutation.
+func (m *RiskSessionBlacklistMutation) APIKeyIDCleared() bool {
+	_, ok := m.clearedFields[risksessionblacklist.FieldAPIKeyID]
+	return ok
+}
+
+// ResetAPIKeyID resets all changes to the "api_key_id" field.
+func (m *RiskSessionBlacklistMutation) ResetAPIKeyID() {
+	m.api_key_id = nil
+	m.addapi_key_id = nil
+	delete(m.clearedFields, risksessionblacklist.FieldAPIKeyID)
+}
+
+// SetGroupID sets the "group_id" field.
+func (m *RiskSessionBlacklistMutation) SetGroupID(i int64) {
+	m.group_id = &i
+	m.addgroup_id = nil
+}
+
+// GroupID returns the value of the "group_id" field in the mutation.
+func (m *RiskSessionBlacklistMutation) GroupID() (r int64, exists bool) {
+	v := m.group_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldGroupID returns the old "group_id" field's value of the RiskSessionBlacklist entity.
+// If the RiskSessionBlacklist object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RiskSessionBlacklistMutation) OldGroupID(ctx context.Context) (v *int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldGroupID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldGroupID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldGroupID: %w", err)
+	}
+	return oldValue.GroupID, nil
+}
+
+// AddGroupID adds i to the "group_id" field.
+func (m *RiskSessionBlacklistMutation) AddGroupID(i int64) {
+	if m.addgroup_id != nil {
+		*m.addgroup_id += i
+	} else {
+		m.addgroup_id = &i
+	}
+}
+
+// AddedGroupID returns the value that was added to the "group_id" field in this mutation.
+func (m *RiskSessionBlacklistMutation) AddedGroupID() (r int64, exists bool) {
+	v := m.addgroup_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ClearGroupID clears the value of the "group_id" field.
+func (m *RiskSessionBlacklistMutation) ClearGroupID() {
+	m.group_id = nil
+	m.addgroup_id = nil
+	m.clearedFields[risksessionblacklist.FieldGroupID] = struct{}{}
+}
+
+// GroupIDCleared returns if the "group_id" field was cleared in this mutation.
+func (m *RiskSessionBlacklistMutation) GroupIDCleared() bool {
+	_, ok := m.clearedFields[risksessionblacklist.FieldGroupID]
+	return ok
+}
+
+// ResetGroupID resets all changes to the "group_id" field.
+func (m *RiskSessionBlacklistMutation) ResetGroupID() {
+	m.group_id = nil
+	m.addgroup_id = nil
+	delete(m.clearedFields, risksessionblacklist.FieldGroupID)
+}
+
+// SetReason sets the "reason" field.
+func (m *RiskSessionBlacklistMutation) SetReason(s string) {
+	m.reason = &s
+}
+
+// Reason returns the value of the "reason" field in the mutation.
+func (m *RiskSessionBlacklistMutation) Reason() (r string, exists bool) {
+	v := m.reason
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldReason returns the old "reason" field's value of the RiskSessionBlacklist entity.
+// If the RiskSessionBlacklist object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RiskSessionBlacklistMutation) OldReason(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldReason is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldReason requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldReason: %w", err)
+	}
+	return oldValue.Reason, nil
+}
+
+// ResetReason resets all changes to the "reason" field.
+func (m *RiskSessionBlacklistMutation) ResetReason() {
+	m.reason = nil
+}
+
+// SetCategories sets the "categories" field.
+func (m *RiskSessionBlacklistMutation) SetCategories(s []string) {
+	m.categories = &s
+	m.appendcategories = nil
+}
+
+// Categories returns the value of the "categories" field in the mutation.
+func (m *RiskSessionBlacklistMutation) Categories() (r []string, exists bool) {
+	v := m.categories
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCategories returns the old "categories" field's value of the RiskSessionBlacklist entity.
+// If the RiskSessionBlacklist object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RiskSessionBlacklistMutation) OldCategories(ctx context.Context) (v []string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCategories is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCategories requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCategories: %w", err)
+	}
+	return oldValue.Categories, nil
+}
+
+// AppendCategories adds s to the "categories" field.
+func (m *RiskSessionBlacklistMutation) AppendCategories(s []string) {
+	m.appendcategories = append(m.appendcategories, s...)
+}
+
+// AppendedCategories returns the list of values that were appended to the "categories" field in this mutation.
+func (m *RiskSessionBlacklistMutation) AppendedCategories() ([]string, bool) {
+	if len(m.appendcategories) == 0 {
+		return nil, false
+	}
+	return m.appendcategories, true
+}
+
+// ClearCategories clears the value of the "categories" field.
+func (m *RiskSessionBlacklistMutation) ClearCategories() {
+	m.categories = nil
+	m.appendcategories = nil
+	m.clearedFields[risksessionblacklist.FieldCategories] = struct{}{}
+}
+
+// CategoriesCleared returns if the "categories" field was cleared in this mutation.
+func (m *RiskSessionBlacklistMutation) CategoriesCleared() bool {
+	_, ok := m.clearedFields[risksessionblacklist.FieldCategories]
+	return ok
+}
+
+// ResetCategories resets all changes to the "categories" field.
+func (m *RiskSessionBlacklistMutation) ResetCategories() {
+	m.categories = nil
+	m.appendcategories = nil
+	delete(m.clearedFields, risksessionblacklist.FieldCategories)
+}
+
+// SetConfidence sets the "confidence" field.
+func (m *RiskSessionBlacklistMutation) SetConfidence(f float64) {
+	m.confidence = &f
+	m.addconfidence = nil
+}
+
+// Confidence returns the value of the "confidence" field in the mutation.
+func (m *RiskSessionBlacklistMutation) Confidence() (r float64, exists bool) {
+	v := m.confidence
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldConfidence returns the old "confidence" field's value of the RiskSessionBlacklist entity.
+// If the RiskSessionBlacklist object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RiskSessionBlacklistMutation) OldConfidence(ctx context.Context) (v float64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldConfidence is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldConfidence requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldConfidence: %w", err)
+	}
+	return oldValue.Confidence, nil
+}
+
+// AddConfidence adds f to the "confidence" field.
+func (m *RiskSessionBlacklistMutation) AddConfidence(f float64) {
+	if m.addconfidence != nil {
+		*m.addconfidence += f
+	} else {
+		m.addconfidence = &f
+	}
+}
+
+// AddedConfidence returns the value that was added to the "confidence" field in this mutation.
+func (m *RiskSessionBlacklistMutation) AddedConfidence() (r float64, exists bool) {
+	v := m.addconfidence
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetConfidence resets all changes to the "confidence" field.
+func (m *RiskSessionBlacklistMutation) ResetConfidence() {
+	m.confidence = nil
+	m.addconfidence = nil
+}
+
+// SetAuditModel sets the "audit_model" field.
+func (m *RiskSessionBlacklistMutation) SetAuditModel(s string) {
+	m.audit_model = &s
+}
+
+// AuditModel returns the value of the "audit_model" field in the mutation.
+func (m *RiskSessionBlacklistMutation) AuditModel() (r string, exists bool) {
+	v := m.audit_model
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAuditModel returns the old "audit_model" field's value of the RiskSessionBlacklist entity.
+// If the RiskSessionBlacklist object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RiskSessionBlacklistMutation) OldAuditModel(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAuditModel is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAuditModel requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAuditModel: %w", err)
+	}
+	return oldValue.AuditModel, nil
+}
+
+// ResetAuditModel resets all changes to the "audit_model" field.
+func (m *RiskSessionBlacklistMutation) ResetAuditModel() {
+	m.audit_model = nil
+}
+
+// SetAuditResponseID sets the "audit_response_id" field.
+func (m *RiskSessionBlacklistMutation) SetAuditResponseID(s string) {
+	m.audit_response_id = &s
+}
+
+// AuditResponseID returns the value of the "audit_response_id" field in the mutation.
+func (m *RiskSessionBlacklistMutation) AuditResponseID() (r string, exists bool) {
+	v := m.audit_response_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAuditResponseID returns the old "audit_response_id" field's value of the RiskSessionBlacklist entity.
+// If the RiskSessionBlacklist object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RiskSessionBlacklistMutation) OldAuditResponseID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAuditResponseID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAuditResponseID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAuditResponseID: %w", err)
+	}
+	return oldValue.AuditResponseID, nil
+}
+
+// ResetAuditResponseID resets all changes to the "audit_response_id" field.
+func (m *RiskSessionBlacklistMutation) ResetAuditResponseID() {
+	m.audit_response_id = nil
+}
+
+// SetSourceProtocol sets the "source_protocol" field.
+func (m *RiskSessionBlacklistMutation) SetSourceProtocol(s string) {
+	m.source_protocol = &s
+}
+
+// SourceProtocol returns the value of the "source_protocol" field in the mutation.
+func (m *RiskSessionBlacklistMutation) SourceProtocol() (r string, exists bool) {
+	v := m.source_protocol
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSourceProtocol returns the old "source_protocol" field's value of the RiskSessionBlacklist entity.
+// If the RiskSessionBlacklist object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RiskSessionBlacklistMutation) OldSourceProtocol(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSourceProtocol is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSourceProtocol requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSourceProtocol: %w", err)
+	}
+	return oldValue.SourceProtocol, nil
+}
+
+// ResetSourceProtocol resets all changes to the "source_protocol" field.
+func (m *RiskSessionBlacklistMutation) ResetSourceProtocol() {
+	m.source_protocol = nil
+}
+
+// SetSourceModel sets the "source_model" field.
+func (m *RiskSessionBlacklistMutation) SetSourceModel(s string) {
+	m.source_model = &s
+}
+
+// SourceModel returns the value of the "source_model" field in the mutation.
+func (m *RiskSessionBlacklistMutation) SourceModel() (r string, exists bool) {
+	v := m.source_model
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSourceModel returns the old "source_model" field's value of the RiskSessionBlacklist entity.
+// If the RiskSessionBlacklist object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RiskSessionBlacklistMutation) OldSourceModel(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSourceModel is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSourceModel requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSourceModel: %w", err)
+	}
+	return oldValue.SourceModel, nil
+}
+
+// ResetSourceModel resets all changes to the "source_model" field.
+func (m *RiskSessionBlacklistMutation) ResetSourceModel() {
+	m.source_model = nil
+}
+
+// SetFirstBlockedAt sets the "first_blocked_at" field.
+func (m *RiskSessionBlacklistMutation) SetFirstBlockedAt(t time.Time) {
+	m.first_blocked_at = &t
+}
+
+// FirstBlockedAt returns the value of the "first_blocked_at" field in the mutation.
+func (m *RiskSessionBlacklistMutation) FirstBlockedAt() (r time.Time, exists bool) {
+	v := m.first_blocked_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldFirstBlockedAt returns the old "first_blocked_at" field's value of the RiskSessionBlacklist entity.
+// If the RiskSessionBlacklist object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RiskSessionBlacklistMutation) OldFirstBlockedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldFirstBlockedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldFirstBlockedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldFirstBlockedAt: %w", err)
+	}
+	return oldValue.FirstBlockedAt, nil
+}
+
+// ResetFirstBlockedAt resets all changes to the "first_blocked_at" field.
+func (m *RiskSessionBlacklistMutation) ResetFirstBlockedAt() {
+	m.first_blocked_at = nil
+}
+
+// SetLastSeenAt sets the "last_seen_at" field.
+func (m *RiskSessionBlacklistMutation) SetLastSeenAt(t time.Time) {
+	m.last_seen_at = &t
+}
+
+// LastSeenAt returns the value of the "last_seen_at" field in the mutation.
+func (m *RiskSessionBlacklistMutation) LastSeenAt() (r time.Time, exists bool) {
+	v := m.last_seen_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLastSeenAt returns the old "last_seen_at" field's value of the RiskSessionBlacklist entity.
+// If the RiskSessionBlacklist object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RiskSessionBlacklistMutation) OldLastSeenAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLastSeenAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLastSeenAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLastSeenAt: %w", err)
+	}
+	return oldValue.LastSeenAt, nil
+}
+
+// ResetLastSeenAt resets all changes to the "last_seen_at" field.
+func (m *RiskSessionBlacklistMutation) ResetLastSeenAt() {
+	m.last_seen_at = nil
+}
+
+// SetExpiresAt sets the "expires_at" field.
+func (m *RiskSessionBlacklistMutation) SetExpiresAt(t time.Time) {
+	m.expires_at = &t
+}
+
+// ExpiresAt returns the value of the "expires_at" field in the mutation.
+func (m *RiskSessionBlacklistMutation) ExpiresAt() (r time.Time, exists bool) {
+	v := m.expires_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldExpiresAt returns the old "expires_at" field's value of the RiskSessionBlacklist entity.
+// If the RiskSessionBlacklist object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RiskSessionBlacklistMutation) OldExpiresAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldExpiresAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldExpiresAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldExpiresAt: %w", err)
+	}
+	return oldValue.ExpiresAt, nil
+}
+
+// ClearExpiresAt clears the value of the "expires_at" field.
+func (m *RiskSessionBlacklistMutation) ClearExpiresAt() {
+	m.expires_at = nil
+	m.clearedFields[risksessionblacklist.FieldExpiresAt] = struct{}{}
+}
+
+// ExpiresAtCleared returns if the "expires_at" field was cleared in this mutation.
+func (m *RiskSessionBlacklistMutation) ExpiresAtCleared() bool {
+	_, ok := m.clearedFields[risksessionblacklist.FieldExpiresAt]
+	return ok
+}
+
+// ResetExpiresAt resets all changes to the "expires_at" field.
+func (m *RiskSessionBlacklistMutation) ResetExpiresAt() {
+	m.expires_at = nil
+	delete(m.clearedFields, risksessionblacklist.FieldExpiresAt)
+}
+
+// Where appends a list predicates to the RiskSessionBlacklistMutation builder.
+func (m *RiskSessionBlacklistMutation) Where(ps ...predicate.RiskSessionBlacklist) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the RiskSessionBlacklistMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *RiskSessionBlacklistMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.RiskSessionBlacklist, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *RiskSessionBlacklistMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *RiskSessionBlacklistMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (RiskSessionBlacklist).
+func (m *RiskSessionBlacklistMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *RiskSessionBlacklistMutation) Fields() []string {
+	fields := make([]string, 0, 16)
+	if m.created_at != nil {
+		fields = append(fields, risksessionblacklist.FieldCreatedAt)
+	}
+	if m.updated_at != nil {
+		fields = append(fields, risksessionblacklist.FieldUpdatedAt)
+	}
+	if m.session_hash != nil {
+		fields = append(fields, risksessionblacklist.FieldSessionHash)
+	}
+	if m.user_id != nil {
+		fields = append(fields, risksessionblacklist.FieldUserID)
+	}
+	if m.api_key_id != nil {
+		fields = append(fields, risksessionblacklist.FieldAPIKeyID)
+	}
+	if m.group_id != nil {
+		fields = append(fields, risksessionblacklist.FieldGroupID)
+	}
+	if m.reason != nil {
+		fields = append(fields, risksessionblacklist.FieldReason)
+	}
+	if m.categories != nil {
+		fields = append(fields, risksessionblacklist.FieldCategories)
+	}
+	if m.confidence != nil {
+		fields = append(fields, risksessionblacklist.FieldConfidence)
+	}
+	if m.audit_model != nil {
+		fields = append(fields, risksessionblacklist.FieldAuditModel)
+	}
+	if m.audit_response_id != nil {
+		fields = append(fields, risksessionblacklist.FieldAuditResponseID)
+	}
+	if m.source_protocol != nil {
+		fields = append(fields, risksessionblacklist.FieldSourceProtocol)
+	}
+	if m.source_model != nil {
+		fields = append(fields, risksessionblacklist.FieldSourceModel)
+	}
+	if m.first_blocked_at != nil {
+		fields = append(fields, risksessionblacklist.FieldFirstBlockedAt)
+	}
+	if m.last_seen_at != nil {
+		fields = append(fields, risksessionblacklist.FieldLastSeenAt)
+	}
+	if m.expires_at != nil {
+		fields = append(fields, risksessionblacklist.FieldExpiresAt)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *RiskSessionBlacklistMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case risksessionblacklist.FieldCreatedAt:
+		return m.CreatedAt()
+	case risksessionblacklist.FieldUpdatedAt:
+		return m.UpdatedAt()
+	case risksessionblacklist.FieldSessionHash:
+		return m.SessionHash()
+	case risksessionblacklist.FieldUserID:
+		return m.UserID()
+	case risksessionblacklist.FieldAPIKeyID:
+		return m.APIKeyID()
+	case risksessionblacklist.FieldGroupID:
+		return m.GroupID()
+	case risksessionblacklist.FieldReason:
+		return m.Reason()
+	case risksessionblacklist.FieldCategories:
+		return m.Categories()
+	case risksessionblacklist.FieldConfidence:
+		return m.Confidence()
+	case risksessionblacklist.FieldAuditModel:
+		return m.AuditModel()
+	case risksessionblacklist.FieldAuditResponseID:
+		return m.AuditResponseID()
+	case risksessionblacklist.FieldSourceProtocol:
+		return m.SourceProtocol()
+	case risksessionblacklist.FieldSourceModel:
+		return m.SourceModel()
+	case risksessionblacklist.FieldFirstBlockedAt:
+		return m.FirstBlockedAt()
+	case risksessionblacklist.FieldLastSeenAt:
+		return m.LastSeenAt()
+	case risksessionblacklist.FieldExpiresAt:
+		return m.ExpiresAt()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *RiskSessionBlacklistMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case risksessionblacklist.FieldCreatedAt:
+		return m.OldCreatedAt(ctx)
+	case risksessionblacklist.FieldUpdatedAt:
+		return m.OldUpdatedAt(ctx)
+	case risksessionblacklist.FieldSessionHash:
+		return m.OldSessionHash(ctx)
+	case risksessionblacklist.FieldUserID:
+		return m.OldUserID(ctx)
+	case risksessionblacklist.FieldAPIKeyID:
+		return m.OldAPIKeyID(ctx)
+	case risksessionblacklist.FieldGroupID:
+		return m.OldGroupID(ctx)
+	case risksessionblacklist.FieldReason:
+		return m.OldReason(ctx)
+	case risksessionblacklist.FieldCategories:
+		return m.OldCategories(ctx)
+	case risksessionblacklist.FieldConfidence:
+		return m.OldConfidence(ctx)
+	case risksessionblacklist.FieldAuditModel:
+		return m.OldAuditModel(ctx)
+	case risksessionblacklist.FieldAuditResponseID:
+		return m.OldAuditResponseID(ctx)
+	case risksessionblacklist.FieldSourceProtocol:
+		return m.OldSourceProtocol(ctx)
+	case risksessionblacklist.FieldSourceModel:
+		return m.OldSourceModel(ctx)
+	case risksessionblacklist.FieldFirstBlockedAt:
+		return m.OldFirstBlockedAt(ctx)
+	case risksessionblacklist.FieldLastSeenAt:
+		return m.OldLastSeenAt(ctx)
+	case risksessionblacklist.FieldExpiresAt:
+		return m.OldExpiresAt(ctx)
+	}
+	return nil, fmt.Errorf("unknown RiskSessionBlacklist field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *RiskSessionBlacklistMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case risksessionblacklist.FieldCreatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedAt(v)
+		return nil
+	case risksessionblacklist.FieldUpdatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUpdatedAt(v)
+		return nil
+	case risksessionblacklist.FieldSessionHash:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSessionHash(v)
+		return nil
+	case risksessionblacklist.FieldUserID:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUserID(v)
+		return nil
+	case risksessionblacklist.FieldAPIKeyID:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAPIKeyID(v)
+		return nil
+	case risksessionblacklist.FieldGroupID:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetGroupID(v)
+		return nil
+	case risksessionblacklist.FieldReason:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetReason(v)
+		return nil
+	case risksessionblacklist.FieldCategories:
+		v, ok := value.([]string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCategories(v)
+		return nil
+	case risksessionblacklist.FieldConfidence:
+		v, ok := value.(float64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetConfidence(v)
+		return nil
+	case risksessionblacklist.FieldAuditModel:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAuditModel(v)
+		return nil
+	case risksessionblacklist.FieldAuditResponseID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAuditResponseID(v)
+		return nil
+	case risksessionblacklist.FieldSourceProtocol:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSourceProtocol(v)
+		return nil
+	case risksessionblacklist.FieldSourceModel:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSourceModel(v)
+		return nil
+	case risksessionblacklist.FieldFirstBlockedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetFirstBlockedAt(v)
+		return nil
+	case risksessionblacklist.FieldLastSeenAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLastSeenAt(v)
+		return nil
+	case risksessionblacklist.FieldExpiresAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetExpiresAt(v)
+		return nil
+	}
+	return fmt.Errorf("unknown RiskSessionBlacklist field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *RiskSessionBlacklistMutation) AddedFields() []string {
+	var fields []string
+	if m.adduser_id != nil {
+		fields = append(fields, risksessionblacklist.FieldUserID)
+	}
+	if m.addapi_key_id != nil {
+		fields = append(fields, risksessionblacklist.FieldAPIKeyID)
+	}
+	if m.addgroup_id != nil {
+		fields = append(fields, risksessionblacklist.FieldGroupID)
+	}
+	if m.addconfidence != nil {
+		fields = append(fields, risksessionblacklist.FieldConfidence)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *RiskSessionBlacklistMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case risksessionblacklist.FieldUserID:
+		return m.AddedUserID()
+	case risksessionblacklist.FieldAPIKeyID:
+		return m.AddedAPIKeyID()
+	case risksessionblacklist.FieldGroupID:
+		return m.AddedGroupID()
+	case risksessionblacklist.FieldConfidence:
+		return m.AddedConfidence()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *RiskSessionBlacklistMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case risksessionblacklist.FieldUserID:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddUserID(v)
+		return nil
+	case risksessionblacklist.FieldAPIKeyID:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddAPIKeyID(v)
+		return nil
+	case risksessionblacklist.FieldGroupID:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddGroupID(v)
+		return nil
+	case risksessionblacklist.FieldConfidence:
+		v, ok := value.(float64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddConfidence(v)
+		return nil
+	}
+	return fmt.Errorf("unknown RiskSessionBlacklist numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *RiskSessionBlacklistMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(risksessionblacklist.FieldUserID) {
+		fields = append(fields, risksessionblacklist.FieldUserID)
+	}
+	if m.FieldCleared(risksessionblacklist.FieldAPIKeyID) {
+		fields = append(fields, risksessionblacklist.FieldAPIKeyID)
+	}
+	if m.FieldCleared(risksessionblacklist.FieldGroupID) {
+		fields = append(fields, risksessionblacklist.FieldGroupID)
+	}
+	if m.FieldCleared(risksessionblacklist.FieldCategories) {
+		fields = append(fields, risksessionblacklist.FieldCategories)
+	}
+	if m.FieldCleared(risksessionblacklist.FieldExpiresAt) {
+		fields = append(fields, risksessionblacklist.FieldExpiresAt)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *RiskSessionBlacklistMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *RiskSessionBlacklistMutation) ClearField(name string) error {
+	switch name {
+	case risksessionblacklist.FieldUserID:
+		m.ClearUserID()
+		return nil
+	case risksessionblacklist.FieldAPIKeyID:
+		m.ClearAPIKeyID()
+		return nil
+	case risksessionblacklist.FieldGroupID:
+		m.ClearGroupID()
+		return nil
+	case risksessionblacklist.FieldCategories:
+		m.ClearCategories()
+		return nil
+	case risksessionblacklist.FieldExpiresAt:
+		m.ClearExpiresAt()
+		return nil
+	}
+	return fmt.Errorf("unknown RiskSessionBlacklist nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *RiskSessionBlacklistMutation) ResetField(name string) error {
+	switch name {
+	case risksessionblacklist.FieldCreatedAt:
+		m.ResetCreatedAt()
+		return nil
+	case risksessionblacklist.FieldUpdatedAt:
+		m.ResetUpdatedAt()
+		return nil
+	case risksessionblacklist.FieldSessionHash:
+		m.ResetSessionHash()
+		return nil
+	case risksessionblacklist.FieldUserID:
+		m.ResetUserID()
+		return nil
+	case risksessionblacklist.FieldAPIKeyID:
+		m.ResetAPIKeyID()
+		return nil
+	case risksessionblacklist.FieldGroupID:
+		m.ResetGroupID()
+		return nil
+	case risksessionblacklist.FieldReason:
+		m.ResetReason()
+		return nil
+	case risksessionblacklist.FieldCategories:
+		m.ResetCategories()
+		return nil
+	case risksessionblacklist.FieldConfidence:
+		m.ResetConfidence()
+		return nil
+	case risksessionblacklist.FieldAuditModel:
+		m.ResetAuditModel()
+		return nil
+	case risksessionblacklist.FieldAuditResponseID:
+		m.ResetAuditResponseID()
+		return nil
+	case risksessionblacklist.FieldSourceProtocol:
+		m.ResetSourceProtocol()
+		return nil
+	case risksessionblacklist.FieldSourceModel:
+		m.ResetSourceModel()
+		return nil
+	case risksessionblacklist.FieldFirstBlockedAt:
+		m.ResetFirstBlockedAt()
+		return nil
+	case risksessionblacklist.FieldLastSeenAt:
+		m.ResetLastSeenAt()
+		return nil
+	case risksessionblacklist.FieldExpiresAt:
+		m.ResetExpiresAt()
+		return nil
+	}
+	return fmt.Errorf("unknown RiskSessionBlacklist field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *RiskSessionBlacklistMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *RiskSessionBlacklistMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *RiskSessionBlacklistMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *RiskSessionBlacklistMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *RiskSessionBlacklistMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *RiskSessionBlacklistMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *RiskSessionBlacklistMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown RiskSessionBlacklist unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *RiskSessionBlacklistMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown RiskSessionBlacklist edge %s", name)
 }
 
 // SecuritySecretMutation represents an operation that mutates the SecuritySecret nodes in the graph.

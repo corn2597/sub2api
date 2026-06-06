@@ -2817,7 +2817,20 @@ func (s *SettingService) InitializeDefaultSettings(ctx context.Context) error {
 		SettingKeyAffiliateEnabled: "false",
 
 		// 风控中心功能（默认关闭，显式启用）
-		SettingKeyRiskControlEnabled: "false",
+		SettingKeyRiskControlEnabled:            "false",
+		SettingKeyRiskControlProvider:           "legacy_moderation",
+		SettingKeyAuditBaseURL:                  "https://api.openai.com",
+		SettingKeyAuditPath:                     "/v1/responses",
+		SettingKeyAuditModel:                    "",
+		SettingKeyAuditAPIKeys:                  "[]",
+		SettingKeyAuditTimeoutMS:                "3000",
+		SettingKeyAuditFailClosed:               "false",
+		SettingKeyAuditBlockConfidenceThreshold: "0.7",
+		SettingKeySessionAuditIntervalSeconds:   "300",
+		SettingKeySessionBlacklistTTLSeconds:    "0",
+		SettingKeySessionAuditEnabledProtocols:  "[\"anthropic_messages\"]",
+		SettingKeyAuditMaxInputChars:            "12000",
+		SettingKeyAuditPromptTemplate:           "",
 
 		// Claude Code version check (default: empty = disabled)
 		SettingKeyMinClaudeCodeVersion: "",

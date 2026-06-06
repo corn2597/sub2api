@@ -8,13 +8,16 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 )
 
 type contentModerationTestSettingRepo struct {
@@ -77,8 +80,9 @@ func (r *contentModerationTestSettingRepo) Delete(ctx context.Context, key strin
 }
 
 type contentModerationTestRepo struct {
-	mu   sync.Mutex
-	logs []ContentModerationLog
+	mu         sync.Mutex
+	logs       []ContentModerationLog
+	blacklists map[string]RiskSessionBlacklist
 }
 
 func (r *contentModerationTestRepo) CreateLog(ctx context.Context, log *ContentModerationLog) error {
@@ -112,6 +116,62 @@ func (r *contentModerationTestRepo) CountFlaggedByUserSince(ctx context.Context,
 
 func (r *contentModerationTestRepo) CleanupExpiredLogs(ctx context.Context, hitBefore time.Time, nonHitBefore time.Time) (*ContentModerationCleanupResult, error) {
 	return &ContentModerationCleanupResult{}, nil
+}
+
+func (r *contentModerationTestRepo) GetRiskSessionBlacklist(ctx context.Context, sessionHash string) (*RiskSessionBlacklist, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.blacklists == nil {
+		return nil, nil
+	}
+	entry, ok := r.blacklists[sessionHash]
+	if !ok {
+		return nil, nil
+	}
+	clone := entry
+	clone.Categories = append([]string(nil), entry.Categories...)
+	clone.ExpiresAt = cloneTimePtr(entry.ExpiresAt)
+	return &clone, nil
+}
+
+func (r *contentModerationTestRepo) UpsertRiskSessionBlacklist(ctx context.Context, entry *RiskSessionBlacklist) error {
+	if entry == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.blacklists == nil {
+		r.blacklists = map[string]RiskSessionBlacklist{}
+	}
+	clone := *entry
+	clone.Categories = append([]string(nil), entry.Categories...)
+	clone.ExpiresAt = cloneTimePtr(entry.ExpiresAt)
+	r.blacklists[entry.SessionHash] = clone
+	return nil
+}
+
+func (r *contentModerationTestRepo) TouchRiskSessionBlacklist(ctx context.Context, sessionHash string, lastSeenAt time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.blacklists == nil {
+		return nil
+	}
+	entry, ok := r.blacklists[sessionHash]
+	if !ok {
+		return nil
+	}
+	entry.LastSeenAt = lastSeenAt
+	r.blacklists[sessionHash] = entry
+	return nil
+}
+
+func (r *contentModerationTestRepo) DeleteRiskSessionBlacklist(ctx context.Context, sessionHash string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.blacklists != nil {
+		delete(r.blacklists, sessionHash)
+	}
+	return nil
 }
 
 func (r *contentModerationTestRepo) snapshotLogs() []ContentModerationLog {
@@ -150,6 +210,10 @@ type contentModerationTestHashCache struct {
 	deleted       []string
 	hasResult     bool
 	hasResultUsed bool
+	lastSuccess   map[string]time.Time
+	lastAttempt   map[string]time.Time
+	locks         map[string]string
+	blacklists    map[string]RiskSessionBlacklistCacheEntry
 }
 
 type contentModerationTestUserRepo struct {
@@ -347,6 +411,168 @@ func (c *contentModerationTestHashCache) CountFlaggedInputHashes(ctx context.Con
 	return int64(len(c.hashes)), nil
 }
 
+func (c *contentModerationTestHashCache) GetRiskSessionLastSuccessAudit(ctx context.Context, sessionHash string) (*time.Time, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.lastSuccess == nil {
+		return nil, nil
+	}
+	at, ok := c.lastSuccess[sessionHash]
+	if !ok {
+		return nil, nil
+	}
+	v := at
+	return &v, nil
+}
+
+func (c *contentModerationTestHashCache) SetRiskSessionLastSuccessAudit(ctx context.Context, sessionHash string, at time.Time, ttl time.Duration) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.lastSuccess == nil {
+		c.lastSuccess = map[string]time.Time{}
+	}
+	c.lastSuccess[sessionHash] = at
+	return nil
+}
+
+func (c *contentModerationTestHashCache) GetRiskSessionLastAttempt(ctx context.Context, sessionHash string) (*time.Time, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.lastAttempt == nil {
+		return nil, nil
+	}
+	at, ok := c.lastAttempt[sessionHash]
+	if !ok {
+		return nil, nil
+	}
+	v := at
+	return &v, nil
+}
+
+func (c *contentModerationTestHashCache) SetRiskSessionLastAttempt(ctx context.Context, sessionHash string, at time.Time, ttl time.Duration) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.lastAttempt == nil {
+		c.lastAttempt = map[string]time.Time{}
+	}
+	c.lastAttempt[sessionHash] = at
+	return nil
+}
+
+func (c *contentModerationTestHashCache) AcquireRiskSessionAuditLock(ctx context.Context, sessionHash string, token string, ttl time.Duration) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.locks == nil {
+		c.locks = map[string]string{}
+	}
+	if _, ok := c.locks[sessionHash]; ok {
+		return false, nil
+	}
+	c.locks[sessionHash] = token
+	return true, nil
+}
+
+func (c *contentModerationTestHashCache) HasRiskSessionAuditLock(ctx context.Context, sessionHash string) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.locks == nil {
+		return false, nil
+	}
+	_, ok := c.locks[sessionHash]
+	return ok, nil
+}
+
+func (c *contentModerationTestHashCache) ReleaseRiskSessionAuditLock(ctx context.Context, sessionHash string, token string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.locks == nil {
+		return nil
+	}
+	if existing, ok := c.locks[sessionHash]; ok && existing == token {
+		delete(c.locks, sessionHash)
+	}
+	return nil
+}
+
+func (c *contentModerationTestHashCache) GetRiskSessionBlacklistCache(ctx context.Context, sessionHash string) (*RiskSessionBlacklistCacheEntry, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.blacklists == nil {
+		return nil, nil
+	}
+	entry, ok := c.blacklists[sessionHash]
+	if !ok {
+		return nil, nil
+	}
+	clone := entry
+	clone.Categories = append([]string(nil), entry.Categories...)
+	clone.ExpiresAt = cloneTimePtr(entry.ExpiresAt)
+	return &clone, nil
+}
+
+func (c *contentModerationTestHashCache) SetRiskSessionBlacklistCache(ctx context.Context, sessionHash string, entry *RiskSessionBlacklistCacheEntry, ttl time.Duration) error {
+	if entry == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.blacklists == nil {
+		c.blacklists = map[string]RiskSessionBlacklistCacheEntry{}
+	}
+	clone := *entry
+	clone.Categories = append([]string(nil), entry.Categories...)
+	clone.ExpiresAt = cloneTimePtr(entry.ExpiresAt)
+	c.blacklists[sessionHash] = clone
+	return nil
+}
+
+func (c *contentModerationTestHashCache) DeleteRiskSessionBlacklistCache(ctx context.Context, sessionHash string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.blacklists != nil {
+		delete(c.blacklists, sessionHash)
+	}
+	return nil
+}
+
+type sessionAuditClientStub struct {
+	calls   atomic.Int32
+	handler func(ctx context.Context, cfg *SessionAuditProviderConfig, req *OpenAIResponsesSessionAuditRequest) (*OpenAIResponsesSessionAuditResult, error)
+}
+
+func (s *sessionAuditClientStub) Audit(ctx context.Context, cfg *SessionAuditProviderConfig, req *OpenAIResponsesSessionAuditRequest) (*OpenAIResponsesSessionAuditResult, error) {
+	s.calls.Add(1)
+	if s.handler == nil {
+		return &OpenAIResponsesSessionAuditResult{RecommendedAction: ContentModerationActionAllow}, nil
+	}
+	return s.handler(ctx, cfg, req)
+}
+
+func (s *sessionAuditClientStub) callCount() int {
+	return int(s.calls.Load())
+}
+
+type fakeAuditClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func newFakeAuditClock(start time.Time) *fakeAuditClock {
+	return &fakeAuditClock{now: start.UTC()}
+}
+
+func (c *fakeAuditClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *fakeAuditClock) Add(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+}
+
 func (c *contentModerationTestHashCache) snapshotRecorded() []string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -478,6 +704,622 @@ func TestContentModerationCheck_PreBlockKeywordHitSkipsUpstreamCall(t *testing.T
 	require.True(t, logs[0].Flagged)
 	require.Equal(t, ContentModerationActionKeywordBlock, logs[0].Action)
 	require.Equal(t, contentModerationKeywordCategory, logs[0].HighestCategory)
+}
+
+func TestSessionAuditExtractSessionHashPriority(t *testing.T) {
+	svc := NewContentModerationService(nil, nil, &contentModerationTestHashCache{}, nil, nil, nil, nil)
+	body := []byte(`{"metadata":{"user_id":"{\"device_id\":\"dev\",\"account_uuid\":\"\",\"session_id\":\"meta-session\"}","session_id":"body-session"}}`)
+
+	hash, source, err := svc.extractSessionAuditHash(ContentModerationCheckInput{
+		Headers: http.Header{
+			"session_id":   []string{"header-session"},
+			"x-session-id": []string{"header-session-2"},
+		},
+		Body: body,
+	})
+	require.NoError(t, err)
+	require.Equal(t, sha256HexString("header-session"), hash)
+	require.Equal(t, "header", source)
+
+	hash, source, err = svc.extractSessionAuditHash(ContentModerationCheckInput{
+		Headers: http.Header{},
+		Body:    body,
+	})
+	require.NoError(t, err)
+	require.Equal(t, sha256HexString("meta-session"), hash)
+	require.Equal(t, "metadata.user_id", source)
+
+	hash, source, err = svc.extractSessionAuditHash(ContentModerationCheckInput{
+		Headers: http.Header{},
+		Body:    []byte(`{"metadata":{"user_id":{"device_id":"dev","session_id":"object-session"}}}`),
+	})
+	require.NoError(t, err)
+	require.Equal(t, sha256HexString("object-session"), hash)
+	require.Equal(t, "metadata.user_id", source)
+}
+
+func TestContentModerationCheck_SessionAuditFirstAuditAndInterval(t *testing.T) {
+	cfg := defaultContentModerationConfig()
+	cfg.Enabled = true
+	cfg.Mode = ContentModerationModePreBlock
+	rawCfg, err := json.Marshal(cfg)
+	require.NoError(t, err)
+
+	settingRepo := &contentModerationTestSettingRepo{values: map[string]string{
+		SettingKeyRiskControlEnabled:            "true",
+		SettingKeyContentModerationConfig:       string(rawCfg),
+		SettingKeyRiskControlProvider:           RiskControlProviderOpenAIResponsesSessionAudit,
+		SettingKeyAuditModel:                    "gpt-5-mini",
+		SettingKeyAuditAPIKeys:                  `["sk-audit"]`,
+		SettingKeySessionAuditEnabledProtocols:  `["anthropic_messages"]`,
+		SettingKeySessionAuditIntervalSeconds:   "300",
+		SettingKeyAuditBlockConfidenceThreshold: "0.7",
+		SettingKeyAuditTimeoutMS:                "3000",
+	}}
+	repo := &contentModerationTestRepo{}
+	cache := &contentModerationTestHashCache{}
+	clock := newFakeAuditClock(time.Date(2026, 6, 6, 0, 0, 0, 0, time.UTC))
+	client := &sessionAuditClientStub{
+		handler: func(ctx context.Context, cfg *SessionAuditProviderConfig, req *OpenAIResponsesSessionAuditRequest) (*OpenAIResponsesSessionAuditResult, error) {
+			return &OpenAIResponsesSessionAuditResult{
+				Violates:          false,
+				Confidence:        0.1,
+				Categories:        nil,
+				Reason:            "",
+				RecommendedAction: ContentModerationActionAllow,
+			}, nil
+		},
+	}
+	svc := NewContentModerationService(settingRepo, repo, cache, nil, nil, nil, nil)
+	svc.sessionAuditClient = client
+	svc.now = clock.Now
+	svc.sleep = func(ctx context.Context, d time.Duration) error { return nil }
+
+	input := ContentModerationCheckInput{
+		UserID:   7,
+		APIKeyID: 9,
+		GroupID:  int64PtrForAuditTest(12),
+		Endpoint: "/v1/messages",
+		Provider: "anthropic",
+		Model:    "claude-sonnet-4-5",
+		Protocol: ContentModerationProtocolAnthropicMessages,
+		Headers:  http.Header{"session_id": []string{"sess-1"}},
+		Body:     []byte(`{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"hello"}]}`),
+	}
+
+	decision, err := svc.Check(context.Background(), input)
+	require.NoError(t, err)
+	require.True(t, decision.Allowed)
+	require.Equal(t, 1, client.callCount())
+
+	decision, err = svc.Check(context.Background(), input)
+	require.NoError(t, err)
+	require.True(t, decision.Allowed)
+	require.Equal(t, 1, client.callCount(), "within interval should reuse success audit")
+
+	clock.Add(5 * time.Minute)
+	decision, err = svc.Check(context.Background(), input)
+	require.NoError(t, err)
+	require.True(t, decision.Allowed)
+	require.Equal(t, 2, client.callCount(), "after interval should re-audit")
+}
+
+func TestContentModerationCheck_SessionAuditViolationBlacklists(t *testing.T) {
+	cfg := defaultContentModerationConfig()
+	cfg.Enabled = true
+	cfg.Mode = ContentModerationModePreBlock
+	rawCfg, err := json.Marshal(cfg)
+	require.NoError(t, err)
+
+	settingRepo := &contentModerationTestSettingRepo{values: map[string]string{
+		SettingKeyRiskControlEnabled:            "true",
+		SettingKeyContentModerationConfig:       string(rawCfg),
+		SettingKeyRiskControlProvider:           RiskControlProviderOpenAIResponsesSessionAudit,
+		SettingKeyAuditModel:                    "gpt-5-mini",
+		SettingKeyAuditAPIKeys:                  `["sk-audit"]`,
+		SettingKeySessionAuditEnabledProtocols:  `["anthropic_messages"]`,
+		SettingKeyAuditBlockConfidenceThreshold: "0.7",
+	}}
+	repo := &contentModerationTestRepo{}
+	cache := &contentModerationTestHashCache{}
+	client := &sessionAuditClientStub{
+		handler: func(ctx context.Context, cfg *SessionAuditProviderConfig, req *OpenAIResponsesSessionAuditRequest) (*OpenAIResponsesSessionAuditResult, error) {
+			return &OpenAIResponsesSessionAuditResult{
+				Violates:          true,
+				Confidence:        0.91,
+				Categories:        []string{"aup_fraud"},
+				Reason:            "violation",
+				RecommendedAction: ContentModerationActionBlock,
+			}, nil
+		},
+	}
+	svc := NewContentModerationService(settingRepo, repo, cache, nil, nil, nil, nil)
+	svc.sessionAuditClient = client
+
+	input := ContentModerationCheckInput{
+		Endpoint: "/v1/messages",
+		Provider: "anthropic",
+		Model:    "claude-sonnet-4-5",
+		Protocol: ContentModerationProtocolAnthropicMessages,
+		Headers:  http.Header{"session_id": []string{"sess-block"}},
+		Body:     []byte(`{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"do bad thing"}]}`),
+	}
+
+	decision, err := svc.Check(context.Background(), input)
+	require.NoError(t, err)
+	require.True(t, decision.Blocked)
+	require.Equal(t, sessionAuditBlockMessage, decision.Message)
+	require.Equal(t, 1, client.callCount())
+
+	decision, err = svc.Check(context.Background(), input)
+	require.NoError(t, err)
+	require.True(t, decision.Blocked)
+	require.Equal(t, 1, client.callCount(), "blacklisted session should not call audit again")
+}
+
+func TestContentModerationCheck_SessionAuditConcurrentFirstRequestAuditsOnce(t *testing.T) {
+	cfg := defaultContentModerationConfig()
+	cfg.Enabled = true
+	cfg.Mode = ContentModerationModePreBlock
+	rawCfg, err := json.Marshal(cfg)
+	require.NoError(t, err)
+
+	settingRepo := &contentModerationTestSettingRepo{values: map[string]string{
+		SettingKeyRiskControlEnabled:            "true",
+		SettingKeyContentModerationConfig:       string(rawCfg),
+		SettingKeyRiskControlProvider:           RiskControlProviderOpenAIResponsesSessionAudit,
+		SettingKeyAuditModel:                    "gpt-5-mini",
+		SettingKeyAuditAPIKeys:                  `["sk-audit"]`,
+		SettingKeySessionAuditEnabledProtocols:  `["anthropic_messages"]`,
+		SettingKeyAuditBlockConfidenceThreshold: "0.7",
+	}}
+	cache := &contentModerationTestHashCache{}
+	clientStarted := make(chan struct{}, 1)
+	releaseClient := make(chan struct{})
+	client := &sessionAuditClientStub{
+		handler: func(ctx context.Context, cfg *SessionAuditProviderConfig, req *OpenAIResponsesSessionAuditRequest) (*OpenAIResponsesSessionAuditResult, error) {
+			select {
+			case clientStarted <- struct{}{}:
+			default:
+			}
+			<-releaseClient
+			return &OpenAIResponsesSessionAuditResult{
+				RecommendedAction: ContentModerationActionAllow,
+				Confidence:        0.2,
+			}, nil
+		},
+	}
+	svc := NewContentModerationService(settingRepo, &contentModerationTestRepo{}, cache, nil, nil, nil, nil)
+	svc.sessionAuditClient = client
+	svc.sleep = func(ctx context.Context, d time.Duration) error {
+		return contentModerationSleepWithContext(ctx, time.Millisecond)
+	}
+
+	input := ContentModerationCheckInput{
+		Endpoint: "/v1/messages",
+		Provider: "anthropic",
+		Model:    "claude-sonnet-4-5",
+		Protocol: ContentModerationProtocolAnthropicMessages,
+		Headers:  http.Header{"session_id": []string{"sess-concurrent"}},
+		Body:     []byte(`{"messages":[{"role":"user","content":"hello"}]}`),
+	}
+
+	results := make(chan *ContentModerationDecision, 2)
+	errs := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			decision, checkErr := svc.Check(context.Background(), input)
+			results <- decision
+			errs <- checkErr
+		}()
+	}
+
+	<-clientStarted
+	close(releaseClient)
+	for i := 0; i < 2; i++ {
+		require.NoError(t, <-errs)
+		require.True(t, (<-results).Allowed)
+	}
+	require.Equal(t, 1, client.callCount(), "concurrent first request should audit once")
+}
+
+func TestContentModerationCheck_SessionAuditFailOpenFailClosedAndThreshold(t *testing.T) {
+	cfg := defaultContentModerationConfig()
+	cfg.Enabled = true
+	cfg.Mode = ContentModerationModePreBlock
+	rawCfg, err := json.Marshal(cfg)
+	require.NoError(t, err)
+
+	newSvc := func(extra map[string]string, handler func(context.Context, *SessionAuditProviderConfig, *OpenAIResponsesSessionAuditRequest) (*OpenAIResponsesSessionAuditResult, error)) *ContentModerationService {
+		values := map[string]string{
+			SettingKeyRiskControlEnabled:            "true",
+			SettingKeyContentModerationConfig:       string(rawCfg),
+			SettingKeyRiskControlProvider:           RiskControlProviderOpenAIResponsesSessionAudit,
+			SettingKeyAuditModel:                    "gpt-5-mini",
+			SettingKeyAuditAPIKeys:                  `["sk-audit"]`,
+			SettingKeySessionAuditEnabledProtocols:  `["anthropic_messages"]`,
+			SettingKeyAuditBlockConfidenceThreshold: "0.7",
+		}
+		for k, v := range extra {
+			values[k] = v
+		}
+		svc := NewContentModerationService(&contentModerationTestSettingRepo{values: values}, &contentModerationTestRepo{}, &contentModerationTestHashCache{}, nil, nil, nil, nil)
+		svc.sessionAuditClient = &sessionAuditClientStub{handler: handler}
+		return svc
+	}
+	input := ContentModerationCheckInput{
+		Endpoint: "/v1/messages",
+		Provider: "anthropic",
+		Model:    "claude-sonnet-4-5",
+		Protocol: ContentModerationProtocolAnthropicMessages,
+		Headers:  http.Header{"session_id": []string{"sess-test"}},
+		Body:     []byte(`{"messages":[{"role":"user","content":"hello"}]}`),
+	}
+
+	svc := newSvc(nil, func(ctx context.Context, cfg *SessionAuditProviderConfig, req *OpenAIResponsesSessionAuditRequest) (*OpenAIResponsesSessionAuditResult, error) {
+		return nil, fmt.Errorf("malformed json")
+	})
+	decision, err := svc.Check(context.Background(), input)
+	require.NoError(t, err)
+	require.True(t, decision.Allowed, "fail-open should allow")
+
+	svc = newSvc(map[string]string{SettingKeyAuditFailClosed: "true"}, func(ctx context.Context, cfg *SessionAuditProviderConfig, req *OpenAIResponsesSessionAuditRequest) (*OpenAIResponsesSessionAuditResult, error) {
+		return nil, fmt.Errorf("timeout")
+	})
+	decision, err = svc.Check(context.Background(), input)
+	require.NoError(t, err)
+	require.True(t, decision.Blocked, "fail-closed should block on audit error")
+
+	svc = newSvc(nil, func(ctx context.Context, cfg *SessionAuditProviderConfig, req *OpenAIResponsesSessionAuditRequest) (*OpenAIResponsesSessionAuditResult, error) {
+		return &OpenAIResponsesSessionAuditResult{
+			Violates:          true,
+			Confidence:        0.69,
+			Categories:        []string{"uncertain"},
+			Reason:            "low confidence",
+			RecommendedAction: ContentModerationActionBlock,
+		}, nil
+	})
+	decision, err = svc.Check(context.Background(), input)
+	require.NoError(t, err)
+	require.True(t, decision.Allowed, "below threshold should allow")
+}
+
+func TestContentModerationCheck_SessionAuditFailClosedMissingConfigBlocksWithoutBlacklist(t *testing.T) {
+	cfg := defaultContentModerationConfig()
+	cfg.Enabled = true
+	cfg.Mode = ContentModerationModePreBlock
+	rawCfg, err := json.Marshal(cfg)
+	require.NoError(t, err)
+
+	repo := &contentModerationTestRepo{}
+	client := &sessionAuditClientStub{
+		handler: func(ctx context.Context, cfg *SessionAuditProviderConfig, req *OpenAIResponsesSessionAuditRequest) (*OpenAIResponsesSessionAuditResult, error) {
+			t.Fatal("missing audit config should block before calling audit client")
+			return nil, nil
+		},
+	}
+	svc := NewContentModerationService(
+		&contentModerationTestSettingRepo{values: map[string]string{
+			SettingKeyRiskControlEnabled:      "true",
+			SettingKeyContentModerationConfig: string(rawCfg),
+			SettingKeyRiskControlProvider:     RiskControlProviderOpenAIResponsesSessionAudit,
+			SettingKeyAuditFailClosed:         "true",
+		}},
+		repo,
+		&contentModerationTestHashCache{},
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+	svc.sessionAuditClient = client
+
+	decision, err := svc.Check(context.Background(), ContentModerationCheckInput{
+		Endpoint: "/v1/messages",
+		Provider: "anthropic",
+		Model:    "claude-sonnet-4-5",
+		Protocol: ContentModerationProtocolAnthropicMessages,
+		Headers:  http.Header{"session_id": []string{"sess-missing-config"}},
+		Body:     []byte(`{"messages":[{"role":"user","content":"hello"}]}`),
+	})
+
+	require.NoError(t, err)
+	require.True(t, decision.Blocked)
+	require.Equal(t, ContentModerationActionError, decision.Action)
+	require.Equal(t, sessionAuditBlockMessage, decision.Message)
+	require.Equal(t, 0, client.callCount())
+
+	entry, err := repo.GetRiskSessionBlacklist(context.Background(), sha256HexString("sess-missing-config"))
+	require.NoError(t, err)
+	require.Nil(t, entry, "fail-closed config errors must not blacklist")
+}
+
+func TestContentModerationCheck_SessionAuditProviderDisabledKeepsLegacyModeration(t *testing.T) {
+	upstreamCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalled = true
+		require.Equal(t, "/v1/moderations", r.URL.Path)
+		_ = json.NewEncoder(w).Encode(moderationAPIResponse{Results: []moderationAPIResult{{CategoryScores: map[string]float64{"sexual": 0.1}}}})
+	}))
+	defer server.Close()
+
+	cfg := defaultContentModerationConfig()
+	cfg.Enabled = true
+	cfg.Mode = ContentModerationModePreBlock
+	cfg.BaseURL = server.URL
+	cfg.APIKeys = []string{"sk-legacy"}
+	rawCfg, err := json.Marshal(cfg)
+	require.NoError(t, err)
+
+	sessionClient := &sessionAuditClientStub{
+		handler: func(ctx context.Context, cfg *SessionAuditProviderConfig, req *OpenAIResponsesSessionAuditRequest) (*OpenAIResponsesSessionAuditResult, error) {
+			t.Fatal("session audit must not run when provider is legacy_moderation")
+			return nil, nil
+		},
+	}
+	svc := NewContentModerationService(
+		&contentModerationTestSettingRepo{values: map[string]string{
+			SettingKeyRiskControlEnabled:      "true",
+			SettingKeyContentModerationConfig: string(rawCfg),
+			SettingKeyRiskControlProvider:     RiskControlProviderLegacyModeration,
+			SettingKeyAuditModel:              "gpt-5-mini",
+			SettingKeyAuditAPIKeys:            `["sk-audit"]`,
+		}},
+		&contentModerationTestRepo{},
+		&contentModerationTestHashCache{},
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+	svc.sessionAuditClient = sessionClient
+
+	decision, err := svc.Check(context.Background(), ContentModerationCheckInput{
+		Endpoint: "/v1/messages",
+		Provider: "anthropic",
+		Model:    "claude-sonnet-4-5",
+		Protocol: ContentModerationProtocolAnthropicMessages,
+		Headers:  http.Header{"session_id": []string{"sess-legacy"}},
+		Body:     []byte(`{"messages":[{"role":"user","content":"hello"}]}`),
+	})
+
+	require.NoError(t, err)
+	require.True(t, decision.Allowed)
+	require.True(t, upstreamCalled, "legacy moderation API should still be used")
+	require.Equal(t, 0, sessionClient.callCount())
+}
+
+func TestContentModerationCheck_SessionAuditModeOffSkipsAudit(t *testing.T) {
+	cfg := defaultContentModerationConfig()
+	cfg.Enabled = true
+	cfg.Mode = ContentModerationModeOff
+	rawCfg, err := json.Marshal(cfg)
+	require.NoError(t, err)
+
+	client := &sessionAuditClientStub{
+		handler: func(ctx context.Context, cfg *SessionAuditProviderConfig, req *OpenAIResponsesSessionAuditRequest) (*OpenAIResponsesSessionAuditResult, error) {
+			t.Fatal("session audit must not run in mode=off")
+			return nil, nil
+		},
+	}
+	svc := NewContentModerationService(
+		&contentModerationTestSettingRepo{values: map[string]string{
+			SettingKeyRiskControlEnabled:      "true",
+			SettingKeyContentModerationConfig: string(rawCfg),
+			SettingKeyRiskControlProvider:     RiskControlProviderOpenAIResponsesSessionAudit,
+			SettingKeyAuditModel:              "gpt-5-mini",
+			SettingKeyAuditAPIKeys:            `["sk-audit"]`,
+		}},
+		&contentModerationTestRepo{},
+		&contentModerationTestHashCache{},
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+	svc.sessionAuditClient = client
+
+	decision, err := svc.Check(context.Background(), ContentModerationCheckInput{
+		Endpoint: "/v1/messages",
+		Provider: "anthropic",
+		Model:    "claude-sonnet-4-5",
+		Protocol: ContentModerationProtocolAnthropicMessages,
+		Headers:  http.Header{"session_id": []string{"sess-off"}},
+		Body:     []byte(`{"messages":[{"role":"user","content":"hello"}]}`),
+	})
+
+	require.NoError(t, err)
+	require.True(t, decision.Allowed)
+	require.Equal(t, 0, client.callCount())
+}
+
+func TestContentModerationCheck_SessionAuditObserveAuditsButDoesNotBlacklist(t *testing.T) {
+	cfg := defaultContentModerationConfig()
+	cfg.Enabled = true
+	cfg.Mode = ContentModerationModeObserve
+	cfg.RecordNonHits = true
+	rawCfg, err := json.Marshal(cfg)
+	require.NoError(t, err)
+
+	repo := &contentModerationTestRepo{}
+	cache := &contentModerationTestHashCache{}
+	client := &sessionAuditClientStub{
+		handler: func(ctx context.Context, cfg *SessionAuditProviderConfig, req *OpenAIResponsesSessionAuditRequest) (*OpenAIResponsesSessionAuditResult, error) {
+			return &OpenAIResponsesSessionAuditResult{
+				Violates:          true,
+				Confidence:        0.99,
+				Categories:        []string{"aup_fraud"},
+				Reason:            "clear violation",
+				RecommendedAction: ContentModerationActionBlock,
+			}, nil
+		},
+	}
+	svc := NewContentModerationService(
+		&contentModerationTestSettingRepo{values: map[string]string{
+			SettingKeyRiskControlEnabled:            "true",
+			SettingKeyContentModerationConfig:       string(rawCfg),
+			SettingKeyRiskControlProvider:           RiskControlProviderOpenAIResponsesSessionAudit,
+			SettingKeyAuditModel:                    "gpt-5-mini",
+			SettingKeyAuditAPIKeys:                  `["sk-audit"]`,
+			SettingKeyAuditBlockConfidenceThreshold: "0.7",
+		}},
+		repo,
+		cache,
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+	svc.sessionAuditClient = client
+
+	input := ContentModerationCheckInput{
+		Endpoint: "/v1/messages",
+		Provider: "anthropic",
+		Model:    "claude-sonnet-4-5",
+		Protocol: ContentModerationProtocolAnthropicMessages,
+		Headers:  http.Header{"session_id": []string{"sess-observe"}},
+		Body:     []byte(`{"messages":[{"role":"user","content":"bad request"}]}`),
+	}
+	decision, err := svc.Check(context.Background(), input)
+	require.NoError(t, err)
+	require.True(t, decision.Allowed, "observe mode must not block even on explicit violation")
+	require.True(t, decision.Flagged)
+	require.Equal(t, ContentModerationActionAllow, decision.Action)
+	require.Equal(t, 1, client.callCount())
+
+	sessionHash := sha256HexString("sess-observe")
+	entry, err := repo.GetRiskSessionBlacklist(context.Background(), sessionHash)
+	require.NoError(t, err)
+	require.Nil(t, entry, "observe mode must not persist blacklist")
+
+	decision, err = svc.Check(context.Background(), input)
+	require.NoError(t, err)
+	require.True(t, decision.Allowed)
+	require.Equal(t, 1, client.callCount(), "observe mode should still cache successful audit outcome")
+}
+
+func TestBuildSessionAuditPayload_RedactsSensitiveMetadataAndToolFields(t *testing.T) {
+	svc := &ContentModerationService{}
+	cfg := defaultSessionAuditProviderConfig()
+	cfg.AuditMaxInputChars = 12000
+
+	rawSessionID := "raw-session-short"
+	rawMetadataUserID := `{"device_id":"device-1","account_uuid":"acct-1","session_id":"` + rawSessionID + `"}`
+	body := []byte(`{
+		"model":"claude-sonnet-4-5",
+		"stream":true,
+		"metadata":{
+			"user_id":` + strconv.Quote(rawMetadataUserID) + `,
+			"session_id":"metadata-session-raw",
+			"nested":{"access_token":"tok-secret-value","cookie":"session=raw-cookie"}
+		},
+		"tools":[{
+			"name":"fetch_private_data",
+			"description":"uses Authorization headers",
+			"input_schema":{
+				"type":"object",
+				"properties":{
+					"api_key":{"type":"string"},
+					"query":{"type":"string"}
+				}
+			}
+		}],
+		"messages":[{"role":"user","content":"Summarize this harmless text."}]
+	}`)
+	headers := http.Header{}
+	headers.Set("X-Cpa-Managed-Instance", "cpa2")
+	headers.Set("X-Cpa-Managed-Domain", "cpa2.claudecodes.org")
+	headers.Set("X-Api-Key", "sk-live-should-not-leak")
+	headers.Set("Authorization", "Bearer token-should-not-leak")
+	headers.Set("User-Agent", "claude-cli/2.1.119 (external, cli)")
+	headers.Set("Anthropic-Beta", "claude-code-20250219,oauth-2025-04-20")
+
+	payload := svc.buildSessionAuditPayload(ContentModerationCheckInput{
+		UserID:   7,
+		APIKeyID: 9,
+		GroupID:  int64PtrForAuditTest(12),
+		Endpoint: "/v1/messages",
+		Provider: "anthropic",
+		Model:    "claude-sonnet-4-5",
+		Protocol: ContentModerationProtocolAnthropicMessages,
+		Body:     body,
+		Headers:  headers,
+	}, sha256HexString(rawSessionID), "metadata.user_id", cfg)
+
+	require.Contains(t, payload, "session_hash: "+sha256HexString(rawSessionID))
+	require.Contains(t, payload, "latest_user_excerpt: Summarize this harmless text.")
+	require.Contains(t, payload, "request_context_summary:")
+	require.Contains(t, payload, "managed_relay_headers_present=true")
+	require.Contains(t, payload, "managed_relay_domain=cpa2.claudecodes.org")
+	require.Contains(t, payload, "credential_headers_present=true")
+	require.Contains(t, payload, "user_agent_family=claude-cli")
+	require.NotContains(t, payload, rawSessionID)
+	require.NotContains(t, payload, rawMetadataUserID)
+	require.NotContains(t, payload, "metadata-session-raw")
+	require.NotContains(t, payload, "tok-secret-value")
+	require.NotContains(t, payload, "raw-cookie")
+	require.NotContains(t, payload, "sk-live-should-not-leak")
+	require.NotContains(t, payload, "token-should-not-leak")
+	require.NotContains(t, payload, `"api_key":{"type":"string"}`)
+	require.Contains(t, payload, `"user_id":"[REDACTED]"`)
+	require.Contains(t, payload, `"session_id":"[REDACTED]"`)
+	require.Contains(t, payload, `"api_key":"[REDACTED]"`)
+}
+
+func TestOpenAIResponsesAuditClient_RequestAndParsing(t *testing.T) {
+	var authHeader string
+	var reqPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authHeader = r.Header.Get("Authorization")
+		reqPath = r.URL.Path
+		var payload map[string]any
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&payload))
+		firstText := gjson.GetBytes(mustJSONBytes(t, payload), "input.0.content.0.text").String()
+		if strings.Contains(firstText, "nested") {
+			_, _ = w.Write([]byte("{\"id\":\"resp_2\",\"output\":[{\"content\":[{\"text\":\"```json\\n{\\\"violates\\\":true,\\\"confidence\\\":0.9,\\\"categories\\\":[\\\"aup\\\"],\\\"reason\\\":\\\"r\\\",\\\"evidence_excerpt\\\":\\\"e\\\",\\\"recommended_action\\\":\\\"block\\\"}\\n```\"}]}]}"))
+			return
+		}
+		_, _ = w.Write([]byte("{\"id\":\"resp_1\",\"output_text\":\"{\\\"violates\\\":false,\\\"confidence\\\":0.1,\\\"categories\\\":[],\\\"reason\\\":\\\"\\\",\\\"evidence_excerpt\\\":\\\"\\\",\\\"recommended_action\\\":\\\"allow\\\"}\"}"))
+	}))
+	defer server.Close()
+
+	client := NewOpenAIResponsesAuditClient(server.Client())
+	cfg := defaultSessionAuditProviderConfig()
+	cfg.Provider = RiskControlProviderOpenAIResponsesSessionAudit
+	cfg.BaseURL = server.URL + "/v1/"
+	cfg.Path = "/v1/responses"
+	cfg.Model = "gpt-5-mini"
+	cfg.APIKeys = []string{"sk-audit-1", "sk-audit-2"}
+
+	result, err := client.Audit(context.Background(), cfg, &OpenAIResponsesSessionAuditRequest{
+		SessionHash: "hash-1",
+		Prompt:      "prompt",
+		Payload:     "payload",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "Bearer sk-audit-1", authHeader)
+	require.Equal(t, "/v1/responses", reqPath)
+	require.False(t, result.Violates)
+
+	cfg.Path = "/v1/responses"
+	result, err = client.Audit(context.Background(), cfg, &OpenAIResponsesSessionAuditRequest{
+		SessionHash: "hash-2",
+		Prompt:      "nested prompt",
+		Payload:     "payload",
+	})
+	require.NoError(t, err)
+	require.True(t, result.Violates)
+}
+
+func int64PtrForAuditTest(v int64) *int64 {
+	return &v
+}
+
+func mustJSONBytes(t *testing.T, v any) []byte {
+	t.Helper()
+	data, err := json.Marshal(v)
+	require.NoError(t, err)
+	return data
 }
 
 func TestContentModerationCheck_KeywordsIgnoredInObserveMode(t *testing.T) {

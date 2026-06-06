@@ -28,6 +28,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/promocodeusage"
 	"github.com/Wei-Shaw/sub2api/ent/proxy"
 	"github.com/Wei-Shaw/sub2api/ent/redeemcode"
+	"github.com/Wei-Shaw/sub2api/ent/risksessionblacklist"
 	"github.com/Wei-Shaw/sub2api/ent/schema"
 	"github.com/Wei-Shaw/sub2api/ent/securitysecret"
 	"github.com/Wei-Shaw/sub2api/ent/setting"
@@ -1406,6 +1407,49 @@ func init() {
 	redeemcodeDescValidityDays := redeemcodeFields[10].Descriptor()
 	// redeemcode.DefaultValidityDays holds the default value on creation for the validity_days field.
 	redeemcode.DefaultValidityDays = redeemcodeDescValidityDays.Default.(int)
+	risksessionblacklistMixin := schema.RiskSessionBlacklist{}.Mixin()
+	risksessionblacklistMixinFields0 := risksessionblacklistMixin[0].Fields()
+	_ = risksessionblacklistMixinFields0
+	risksessionblacklistFields := schema.RiskSessionBlacklist{}.Fields()
+	_ = risksessionblacklistFields
+	// risksessionblacklistDescCreatedAt is the schema descriptor for created_at field.
+	risksessionblacklistDescCreatedAt := risksessionblacklistMixinFields0[0].Descriptor()
+	// risksessionblacklist.DefaultCreatedAt holds the default value on creation for the created_at field.
+	risksessionblacklist.DefaultCreatedAt = risksessionblacklistDescCreatedAt.Default.(func() time.Time)
+	// risksessionblacklistDescUpdatedAt is the schema descriptor for updated_at field.
+	risksessionblacklistDescUpdatedAt := risksessionblacklistMixinFields0[1].Descriptor()
+	// risksessionblacklist.DefaultUpdatedAt holds the default value on creation for the updated_at field.
+	risksessionblacklist.DefaultUpdatedAt = risksessionblacklistDescUpdatedAt.Default.(func() time.Time)
+	// risksessionblacklist.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
+	risksessionblacklist.UpdateDefaultUpdatedAt = risksessionblacklistDescUpdatedAt.UpdateDefault.(func() time.Time)
+	// risksessionblacklistDescSessionHash is the schema descriptor for session_hash field.
+	risksessionblacklistDescSessionHash := risksessionblacklistFields[0].Descriptor()
+	// risksessionblacklist.SessionHashValidator is a validator for the "session_hash" field. It is called by the builders before save.
+	risksessionblacklist.SessionHashValidator = risksessionblacklistDescSessionHash.Validators[0].(func(string) error)
+	// risksessionblacklistDescReason is the schema descriptor for reason field.
+	risksessionblacklistDescReason := risksessionblacklistFields[4].Descriptor()
+	// risksessionblacklist.DefaultReason holds the default value on creation for the reason field.
+	risksessionblacklist.DefaultReason = risksessionblacklistDescReason.Default.(string)
+	// risksessionblacklistDescConfidence is the schema descriptor for confidence field.
+	risksessionblacklistDescConfidence := risksessionblacklistFields[6].Descriptor()
+	// risksessionblacklist.DefaultConfidence holds the default value on creation for the confidence field.
+	risksessionblacklist.DefaultConfidence = risksessionblacklistDescConfidence.Default.(float64)
+	// risksessionblacklistDescAuditModel is the schema descriptor for audit_model field.
+	risksessionblacklistDescAuditModel := risksessionblacklistFields[7].Descriptor()
+	// risksessionblacklist.DefaultAuditModel holds the default value on creation for the audit_model field.
+	risksessionblacklist.DefaultAuditModel = risksessionblacklistDescAuditModel.Default.(string)
+	// risksessionblacklistDescAuditResponseID is the schema descriptor for audit_response_id field.
+	risksessionblacklistDescAuditResponseID := risksessionblacklistFields[8].Descriptor()
+	// risksessionblacklist.DefaultAuditResponseID holds the default value on creation for the audit_response_id field.
+	risksessionblacklist.DefaultAuditResponseID = risksessionblacklistDescAuditResponseID.Default.(string)
+	// risksessionblacklistDescSourceProtocol is the schema descriptor for source_protocol field.
+	risksessionblacklistDescSourceProtocol := risksessionblacklistFields[9].Descriptor()
+	// risksessionblacklist.DefaultSourceProtocol holds the default value on creation for the source_protocol field.
+	risksessionblacklist.DefaultSourceProtocol = risksessionblacklistDescSourceProtocol.Default.(string)
+	// risksessionblacklistDescSourceModel is the schema descriptor for source_model field.
+	risksessionblacklistDescSourceModel := risksessionblacklistFields[10].Descriptor()
+	// risksessionblacklist.DefaultSourceModel holds the default value on creation for the source_model field.
+	risksessionblacklist.DefaultSourceModel = risksessionblacklistDescSourceModel.Default.(string)
 	securitysecretMixin := schema.SecuritySecret{}.Mixin()
 	securitysecretMixinFields0 := securitysecretMixin[0].Fields()
 	_ = securitysecretMixinFields0
