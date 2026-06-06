@@ -1073,6 +1073,11 @@
             </div>
           </div>
 
+          <div v-if="inputDetailRow.reason" class="rounded-xl border border-red-100 bg-red-50 p-4 shadow-sm dark:border-red-900/60 dark:bg-red-900/20">
+            <p class="text-sm font-semibold text-red-800 dark:text-red-200">{{ t('admin.riskControl.auditReason') }}</p>
+            <p class="mt-2 whitespace-pre-wrap break-words text-sm leading-6 text-red-700 dark:text-red-100">{{ inputDetailRow.reason }}</p>
+          </div>
+
           <div class="rounded-xl border border-gray-100 bg-white p-4 shadow-sm dark:border-dark-700 dark:bg-dark-800">
             <div class="flex flex-wrap items-center justify-between gap-3">
               <div>

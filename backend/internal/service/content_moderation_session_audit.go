@@ -531,6 +531,7 @@ func (s *ContentModerationService) performSessionAuditLocked(ctx context.Context
 
 	if flagged || cfg.RecordNonHits {
 		log := s.buildLog(input, cfg, action, flagged, highestCategory, highestScore, categoryScores, payload, &latency, nil, "")
+		log.Reason = redactContentModerationSecrets(result.Reason)
 		s.persistContentModerationLog(ctx, cfg, log, "", false, false)
 	}
 

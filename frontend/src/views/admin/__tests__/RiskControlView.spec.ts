@@ -404,4 +404,70 @@ describe('admin RiskControlView', () => {
       'overflow-y-auto',
     ]))
   })
+
+  it('shows audit reason in blocked log details', async () => {
+    listLogs.mockResolvedValue({
+      items: [
+        {
+          id: 1,
+          request_id: 'req-risk-1',
+          user_id: 7,
+          user_email: 'risk-user@example.com',
+          api_key_id: 9,
+          api_key_name: 'risk-key',
+          group_id: 12,
+          group_name: 'risk-group',
+          endpoint: '/v1/messages',
+          provider: 'anthropic',
+          model: 'claude-sonnet-4-5',
+          mode: 'pre_block',
+          action: 'block',
+          flagged: true,
+          highest_category: 'unauthorized_access_or_proxying',
+          highest_score: 0.98,
+          category_scores: { unauthorized_access_or_proxying: 0.98 },
+          threshold_snapshot: { unauthorized_access_or_proxying: 0.7 },
+          input_excerpt: 'session_hash: 1b7563dd4a864057e7f0c7e73889b895f1b1849b58aa1d03b5dc24df60417f25',
+          reason: 'Managed relay headers and credential headers indicate unauthorized Claude access proxying.',
+          upstream_latency_ms: 5890,
+          error: '',
+          violation_count: 1,
+          auto_banned: false,
+          email_sent: false,
+          user_status: 'active',
+          queue_delay_ms: null,
+          created_at: '2026-06-06T12:00:00Z',
+        },
+      ],
+      total: 1,
+      page: 1,
+      page_size: 20,
+      pages: 1,
+    })
+
+    const wrapper = mount(RiskControlView, {
+      global: {
+        stubs: {
+          AppLayout: AppLayoutStub,
+          BaseDialog: BaseDialogStub,
+          Icon: true,
+          Select: true,
+          Toggle: true,
+          Pagination: true,
+          ModelWhitelistSelector: ModelWhitelistSelectorStub,
+        },
+      },
+    })
+
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('admin.riskControl.action.block')
+    expect(wrapper.text()).toContain('unauthorized_access_or_proxying')
+
+    await wrapper.get('tbody button').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('admin.riskControl.auditReason')
+    expect(wrapper.text()).toContain('Managed relay headers and credential headers indicate unauthorized Claude access proxying.')
+  })
 })

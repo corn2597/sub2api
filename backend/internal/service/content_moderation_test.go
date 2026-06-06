@@ -828,7 +828,7 @@ func TestContentModerationCheck_SessionAuditViolationBlacklists(t *testing.T) {
 				Violates:          true,
 				Confidence:        0.91,
 				Categories:        []string{"aup_fraud"},
-				Reason:            "violation",
+				Reason:            "violation because token=secret-token-123 and api_key=should-redact were present",
 				RecommendedAction: ContentModerationActionBlock,
 			}, nil
 		},
@@ -850,6 +850,13 @@ func TestContentModerationCheck_SessionAuditViolationBlacklists(t *testing.T) {
 	require.True(t, decision.Blocked)
 	require.Equal(t, sessionAuditBlockMessage, decision.Message)
 	require.Equal(t, 1, client.callCount())
+	logs := requireContentModerationLogCount(t, repo, 1)
+	require.Equal(t, ContentModerationActionBlock, logs[0].Action)
+	require.Equal(t, "aup_fraud", logs[0].HighestCategory)
+	require.Equal(t, 0.91, logs[0].HighestScore)
+	require.Contains(t, logs[0].Reason, "violation because")
+	require.NotContains(t, logs[0].Reason, "secret-token-123")
+	require.NotContains(t, logs[0].Reason, "should-redact")
 
 	decision, err = svc.Check(context.Background(), input)
 	require.NoError(t, err)
