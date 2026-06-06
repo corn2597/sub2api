@@ -103,16 +103,20 @@ func (c *OpenAIResponsesAuditClient) Audit(ctx context.Context, cfg *SessionAudi
 	if err := json.Unmarshal(respBody, &parsed); err != nil {
 		return nil, fmt.Errorf("unmarshal session audit response: %w", err)
 	}
-	text := extractOpenAIResponsesAuditText(&parsed)
-	if strings.TrimSpace(text) == "" {
+	texts := extractOpenAIResponsesAuditTexts(&parsed)
+	if len(texts) == 0 {
 		return nil, errors.New("session audit response is empty")
 	}
-	result, err := parseOpenAIResponsesAuditResult(text)
-	if err != nil {
-		return nil, err
+	var lastErr error
+	for _, text := range texts {
+		result, err := parseOpenAIResponsesAuditResult(text)
+		if err == nil {
+			result.ResponseID = strings.TrimSpace(parsed.ID)
+			return result, nil
+		}
+		lastErr = err
 	}
-	result.ResponseID = strings.TrimSpace(parsed.ID)
-	return result, nil
+	return nil, lastErr
 }
 
 func (c *OpenAIResponsesAuditClient) nextAPIKey(keys []string) string {
@@ -159,21 +163,31 @@ func joinSessionAuditURL(baseURL string, auditPath string) (string, error) {
 	return u.String(), nil
 }
 
-func extractOpenAIResponsesAuditText(resp *openAIResponsesAuditAPIResponse) string {
+func extractOpenAIResponsesAuditTexts(resp *openAIResponsesAuditAPIResponse) []string {
 	if resp == nil {
-		return ""
+		return nil
 	}
-	if text := strings.TrimSpace(resp.OutputText); text != "" {
-		return text
-	}
+	texts := make([]string, 0, 1)
+	texts = appendOpenAIResponsesAuditText(texts, resp.OutputText)
 	for _, item := range resp.Output {
 		for _, content := range item.Content {
-			if text := strings.TrimSpace(content.Text); text != "" {
-				return text
-			}
+			texts = appendOpenAIResponsesAuditText(texts, content.Text)
 		}
 	}
-	return ""
+	return texts
+}
+
+func appendOpenAIResponsesAuditText(texts []string, raw string) []string {
+	text := strings.TrimSpace(raw)
+	if text == "" {
+		return texts
+	}
+	for _, existing := range texts {
+		if existing == text {
+			return texts
+		}
+	}
+	return append(texts, text)
 }
 
 func parseOpenAIResponsesAuditResult(text string) (*OpenAIResponsesSessionAuditResult, error) {
@@ -212,7 +226,7 @@ func extractOpenAIResponsesAuditJSON(text string) string {
 	if start >= 0 && end > start {
 		return strings.TrimSpace(text[start : end+1])
 	}
-	return text
+	return ""
 }
 
 type openAIResponsesAuditAPIRequest struct {

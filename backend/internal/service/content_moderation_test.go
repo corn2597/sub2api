@@ -1279,6 +1279,10 @@ func TestOpenAIResponsesAuditClient_RequestAndParsing(t *testing.T) {
 			_, _ = w.Write([]byte("{\"id\":\"resp_2\",\"output\":[{\"content\":[{\"text\":\"```json\\n{\\\"violates\\\":true,\\\"confidence\\\":0.9,\\\"categories\\\":[\\\"aup\\\"],\\\"reason\\\":\\\"r\\\",\\\"evidence_excerpt\\\":\\\"e\\\",\\\"recommended_action\\\":\\\"block\\\"}\\n```\"}]}]}"))
 			return
 		}
+		if strings.Contains(firstText, "multiple text blocks") {
+			_, _ = w.Write([]byte("{\"id\":\"resp_3\",\"output\":[{\"content\":[{\"text\":\"I will return the classification JSON next.\"},{\"text\":\"{\\\"violates\\\":true,\\\"confidence\\\":0.95,\\\"categories\\\":[\\\"aup\\\"],\\\"reason\\\":\\\"r\\\",\\\"evidence_excerpt\\\":\\\"e\\\",\\\"recommended_action\\\":\\\"Block\\\"}\"}]}]}"))
+			return
+		}
 		_, _ = w.Write([]byte("{\"id\":\"resp_1\",\"output_text\":\"{\\\"violates\\\":false,\\\"confidence\\\":0.1,\\\"categories\\\":[],\\\"reason\\\":\\\"\\\",\\\"evidence_excerpt\\\":\\\"\\\",\\\"recommended_action\\\":\\\"allow\\\"}\"}"))
 	}))
 	defer server.Close()
@@ -1309,6 +1313,34 @@ func TestOpenAIResponsesAuditClient_RequestAndParsing(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.True(t, result.Violates)
+
+	result, err = client.Audit(context.Background(), cfg, &OpenAIResponsesSessionAuditRequest{
+		SessionHash: "hash-3",
+		Prompt:      "multiple text blocks prompt",
+		Payload:     "payload",
+	})
+	require.NoError(t, err)
+	require.True(t, result.Violates)
+	require.Equal(t, ContentModerationActionBlock, result.RecommendedAction)
+}
+
+func TestEvaluateSessionAuditResult_NormalizesRecommendedAction(t *testing.T) {
+	cfg := defaultSessionAuditProviderConfig()
+	cfg.BlockConfidenceThreshold = 0.7
+	result := &OpenAIResponsesSessionAuditResult{
+		Violates:          false,
+		Confidence:        0.95,
+		Categories:        []string{"aup"},
+		RecommendedAction: " BLOCK ",
+	}
+
+	flagged, blocked, highestCategory, highestScore, _ := evaluateSessionAuditResult(result, cfg, ContentModerationModePreBlock)
+
+	require.True(t, flagged)
+	require.True(t, blocked)
+	require.Equal(t, "aup", highestCategory)
+	require.Equal(t, 0.95, highestScore)
+	require.Equal(t, ContentModerationActionBlock, result.RecommendedAction)
 }
 
 func int64PtrForAuditTest(v int64) *int64 {

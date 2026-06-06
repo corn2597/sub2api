@@ -67,13 +67,13 @@ type OpenAIResponsesSessionAuditRequest struct {
 }
 
 type OpenAIResponsesSessionAuditResult struct {
-	ResponseID        string
-	Violates          bool
-	Confidence        float64
-	Categories        []string
-	Reason            string
-	EvidenceExcerpt   string
-	RecommendedAction string
+	ResponseID        string   `json:"-"`
+	Violates          bool     `json:"violates"`
+	Confidence        float64  `json:"confidence"`
+	Categories        []string `json:"categories"`
+	Reason            string   `json:"reason"`
+	EvidenceExcerpt   string   `json:"evidence_excerpt"`
+	RecommendedAction string   `json:"recommended_action"`
 }
 
 type RiskSessionBlacklist struct {
@@ -1325,7 +1325,7 @@ func normalizeSessionAuditCategories(in []string) []string {
 }
 
 func normalizeSessionAuditRecommendedAction(raw string) string {
-	if strings.TrimSpace(raw) == ContentModerationActionBlock {
+	if strings.ToLower(strings.TrimSpace(raw)) == ContentModerationActionBlock {
 		return ContentModerationActionBlock
 	}
 	return ContentModerationActionAllow
