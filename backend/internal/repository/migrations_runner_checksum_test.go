@@ -153,6 +153,24 @@ func TestIsMigrationChecksumCompatible(t *testing.T) {
 		}
 	})
 
+	t.Run("135历史checksum可兼容后续reason回填版本", func(t *testing.T) {
+		ok := isMigrationChecksumCompatible(
+			"135_content_moderation.sql",
+			"f9545c941580e8cad2b6b5ca4c6522bf1a6335b5a5a04bdc2b143678b289df67",
+			"cc37920e8ad9dfe451a893a7d0e09ada9c4832f84d25e1a9182354904c7d43fb",
+		)
+		require.True(t, ok)
+	})
+
+	t.Run("135回滚到历史文件后仍兼容已应用的新checksum", func(t *testing.T) {
+		ok := isMigrationChecksumCompatible(
+			"135_content_moderation.sql",
+			"cc37920e8ad9dfe451a893a7d0e09ada9c4832f84d25e1a9182354904c7d43fb",
+			"f9545c941580e8cad2b6b5ca4c6522bf1a6335b5a5a04bdc2b143678b289df67",
+		)
+		require.True(t, ok)
+	})
+
 	t.Run("119未知checksum不兼容", func(t *testing.T) {
 		ok := isMigrationChecksumCompatible(
 			"119_enforce_payment_orders_out_trade_no_unique.sql",
