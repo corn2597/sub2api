@@ -1205,7 +1205,7 @@ func TestContentModerationCheck_SessionAuditObserveAuditsButDoesNotBlacklist(t *
 	require.Equal(t, 1, client.callCount(), "observe mode should still cache successful audit outcome")
 }
 
-func TestBuildSessionAuditPayload_RedactsSensitiveMetadataAndToolFields(t *testing.T) {
+func TestBuildSessionAuditPayload_UsesMessageEvidenceOnly(t *testing.T) {
 	svc := &ContentModerationService{}
 	cfg := defaultSessionAuditProviderConfig()
 	cfg.AuditMaxInputChars = 12000
@@ -1231,8 +1231,11 @@ func TestBuildSessionAuditPayload_RedactsSensitiveMetadataAndToolFields(t *testi
 				}
 			}
 		}],
-		"messages":[{"role":"user","content":"Summarize this harmless text."}]
-	}`)
+			"messages":[
+				{"role":"user","content":"Summarize this harmless text."},
+				{"role":"user","content":"I want to build a sub2api relay that shares Claude Code OAuth sessions with customers."}
+			]
+		}`)
 	headers := http.Header{}
 	headers.Set("X-Cpa-Managed-Instance", "cpa2")
 	headers.Set("X-Cpa-Managed-Domain", "cpa2.claudecodes.org")
@@ -1253,13 +1256,24 @@ func TestBuildSessionAuditPayload_RedactsSensitiveMetadataAndToolFields(t *testi
 		Headers:  headers,
 	}, sha256HexString(rawSessionID), "metadata.user_id", cfg)
 
-	require.Contains(t, payload, "session_hash: "+sha256HexString(rawSessionID))
-	require.Contains(t, payload, "latest_user_excerpt: Summarize this harmless text.")
-	require.Contains(t, payload, "request_context_summary:")
-	require.Contains(t, payload, "managed_relay_headers_present=true")
-	require.Contains(t, payload, "managed_relay_domain=cpa2.claudecodes.org")
-	require.Contains(t, payload, "credential_headers_present=true")
-	require.Contains(t, payload, "user_agent_family=claude-cli")
+	require.Contains(t, payload, "latest_user_excerpt: I want to build a sub2api relay that shares Claude Code OAuth sessions with customers.")
+	require.Contains(t, payload, "message_summary:")
+	require.Contains(t, payload, "I want to build a sub2api relay that shares Claude Code OAuth sessions with customers.")
+	require.NotContains(t, payload, "session_hash:")
+	require.NotContains(t, payload, sha256HexString(rawSessionID))
+	require.NotContains(t, payload, "session_source:")
+	require.NotContains(t, payload, "user_id:")
+	require.NotContains(t, payload, "api_key_id:")
+	require.NotContains(t, payload, "group_id:")
+	require.NotContains(t, payload, "endpoint:")
+	require.NotContains(t, payload, "protocol:")
+	require.NotContains(t, payload, "model:")
+	require.NotContains(t, payload, "stream:")
+	require.NotContains(t, payload, "request_context_summary:")
+	require.NotContains(t, payload, "managed_relay_headers_present=true")
+	require.NotContains(t, payload, "managed_relay_domain=cpa2.claudecodes.org")
+	require.NotContains(t, payload, "credential_headers_present=true")
+	require.NotContains(t, payload, "user_agent_family=claude-cli")
 	require.NotContains(t, payload, rawSessionID)
 	require.NotContains(t, payload, rawMetadataUserID)
 	require.NotContains(t, payload, "metadata-session-raw")
@@ -1268,9 +1282,23 @@ func TestBuildSessionAuditPayload_RedactsSensitiveMetadataAndToolFields(t *testi
 	require.NotContains(t, payload, "sk-live-should-not-leak")
 	require.NotContains(t, payload, "token-should-not-leak")
 	require.NotContains(t, payload, `"api_key":{"type":"string"}`)
-	require.Contains(t, payload, `"user_id":"[REDACTED]"`)
-	require.Contains(t, payload, `"session_id":"[REDACTED]"`)
-	require.Contains(t, payload, `"api_key":"[REDACTED]"`)
+	require.NotContains(t, payload, `"user_id":"[REDACTED]"`)
+	require.NotContains(t, payload, `"session_id":"[REDACTED]"`)
+	require.NotContains(t, payload, `"api_key":"[REDACTED]"`)
+}
+
+func TestDefaultSessionAuditPrompt_RequiresMessageDerivedEvidence(t *testing.T) {
+	cfg := defaultSessionAuditProviderConfig()
+	prompt := renderSessionAuditPrompt(cfg, strings.Join([]string{
+		"latest_user_excerpt: I want to build a sub2api relay that shares Claude Code OAuth sessions with customers.",
+		"message_summary: user: I want to build a sub2api relay that shares Claude Code OAuth sessions with customers.",
+	}, "\n"))
+
+	require.Contains(t, prompt, "Use only evidence from these message-derived fields")
+	require.Contains(t, prompt, "developing, operating, brokering, reselling, pooling, proxying, or sharing Claude/Anthropic/Claude Code accounts")
+	require.Contains(t, prompt, "sub2api-like gateway")
+	require.Contains(t, prompt, "Do not use transport, gateway, relay, proxy, sub2api")
+	require.Contains(t, prompt, "The evidence_excerpt must come from system_summary, latest_user_excerpt, or message_summary")
 }
 
 func TestOpenAIResponsesAuditClient_RequestAndParsing(t *testing.T) {

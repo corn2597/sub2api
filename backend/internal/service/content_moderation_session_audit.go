@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -589,35 +588,7 @@ func (s *ContentModerationService) buildSessionAuditPayload(input ContentModerat
 		systemSummary = extractTextFromSystemRaw(parsed.SystemRaw())
 		messageSummary = summarizeAuditMessagesRaw(parsed.MessagesRaw())
 	}
-	toolsSummary := summarizeAuditJSONField(input.Body, "tools")
-	metadataSummary := summarizeAuditJSONField(input.Body, "metadata")
-	sections := make([]string, 0, 12)
-	sections = append(sections, "session_hash: "+sessionHash)
-	sections = append(sections, "session_source: "+sessionSource)
-	if input.UserID > 0 {
-		sections = append(sections, "user_id: "+strconv.FormatInt(input.UserID, 10))
-	}
-	if input.APIKeyID > 0 {
-		sections = append(sections, "api_key_id: "+strconv.FormatInt(input.APIKeyID, 10))
-	}
-	if input.GroupID != nil {
-		sections = append(sections, "group_id: "+strconv.FormatInt(*input.GroupID, 10))
-	}
-	if endpoint := strings.TrimSpace(input.Endpoint); endpoint != "" {
-		sections = append(sections, "endpoint: "+endpoint)
-	}
-	if protocol := strings.TrimSpace(input.Protocol); protocol != "" {
-		sections = append(sections, "protocol: "+protocol)
-	}
-	if model := strings.TrimSpace(input.Model); model != "" {
-		sections = append(sections, "model: "+model)
-	}
-	if stream := gjson.GetBytes(input.Body, "stream"); stream.Exists() {
-		sections = append(sections, "stream: "+stream.Raw)
-	}
-	if requestContext := summarizeSessionAuditRequestContext(input); requestContext != "" {
-		sections = append(sections, "request_context_summary: "+requestContext)
-	}
+	sections := make([]string, 0, 3)
 	if systemSummary = trimRunes(redactContentModerationSecrets(strings.TrimSpace(systemSummary)), maxModerationExcerptRunes*2); systemSummary != "" {
 		sections = append(sections, "system_summary: "+systemSummary)
 	}
@@ -627,115 +598,8 @@ func (s *ContentModerationService) buildSessionAuditPayload(input ContentModerat
 	if messageSummary = trimRunes(redactContentModerationSecrets(strings.TrimSpace(messageSummary)), maxModerationExcerptRunes*3); messageSummary != "" {
 		sections = append(sections, "message_summary: "+messageSummary)
 	}
-	if toolsSummary = trimRunes(redactContentModerationSecrets(strings.TrimSpace(toolsSummary)), maxModerationExcerptRunes*2); toolsSummary != "" {
-		sections = append(sections, "tools_summary: "+toolsSummary)
-	}
-	if metadataSummary = trimRunes(redactContentModerationSecrets(strings.TrimSpace(metadataSummary)), maxModerationExcerptRunes*2); metadataSummary != "" {
-		sections = append(sections, "metadata_summary: "+metadataSummary)
-	}
 	payload := strings.Join(filterEmptyStrings(sections), "\n")
 	return trimRunes(payload, cfg.AuditMaxInputChars)
-}
-
-func summarizeSessionAuditRequestContext(input ContentModerationCheckInput) string {
-	if len(input.Headers) == 0 {
-		return ""
-	}
-	fields := map[string]string{}
-	addHeaderSummaryField(fields, input.Headers, "User-Agent", "user_agent_family", sessionAuditUserAgentFamily)
-	addHeaderSummaryField(fields, input.Headers, "X-App", "client_app", sessionAuditHeaderPlainValue)
-	addHeaderSummaryField(fields, input.Headers, "Originator", "originator", sessionAuditHeaderPlainValue)
-	addHeaderSummaryField(fields, input.Headers, "X-Cpa-Managed-Instance", "managed_relay_instance", sessionAuditHeaderPlainValue)
-	addHeaderSummaryField(fields, input.Headers, "X-Cpa-Managed-Domain", "managed_relay_domain", sessionAuditHeaderDomainValue)
-	addHeaderSummaryField(fields, input.Headers, "Anthropic-Dangerous-Direct-Browser-Access", "dangerous_direct_browser_access", sessionAuditHeaderPlainValue)
-	addHeaderSummaryField(fields, input.Headers, "Anthropic-Beta", "anthropic_beta", sessionAuditHeaderBetaValue)
-	addHeaderSummaryField(fields, input.Headers, "X-Codex-Beta-Features", "codex_beta_features", sessionAuditHeaderBetaValue)
-	if hasAnyHeader(input.Headers, "X-Cpa-Managed-Instance", "X-Cpa-Managed-Domain") {
-		fields["managed_relay_headers_present"] = "true"
-	}
-	if hasAnyHeader(input.Headers, "X-Api-Key", "Authorization", "Cookie") {
-		fields["credential_headers_present"] = "true"
-	}
-	if len(fields) == 0 {
-		return ""
-	}
-	keys := make([]string, 0, len(fields))
-	for key := range fields {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	parts := make([]string, 0, len(keys))
-	for _, key := range keys {
-		if value := strings.TrimSpace(fields[key]); value != "" {
-			parts = append(parts, key+"="+value)
-		}
-	}
-	return strings.Join(parts, "; ")
-}
-
-func addHeaderSummaryField(fields map[string]string, headers http.Header, headerName string, fieldName string, normalize func(string) string) {
-	if fields == nil || len(headers) == 0 {
-		return
-	}
-	for _, value := range headers.Values(headerName) {
-		if normalized := normalize(value); normalized != "" {
-			fields[fieldName] = normalized
-			return
-		}
-	}
-}
-
-func hasAnyHeader(headers http.Header, names ...string) bool {
-	if len(headers) == 0 {
-		return false
-	}
-	for _, name := range names {
-		for _, value := range headers.Values(name) {
-			if strings.TrimSpace(value) != "" {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func sessionAuditHeaderPlainValue(raw string) string {
-	return trimRunes(redactContentModerationSecrets(strings.TrimSpace(raw)), maxModerationExcerptRunes)
-}
-
-func sessionAuditHeaderDomainValue(raw string) string {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return ""
-	}
-	raw = strings.TrimPrefix(raw, "http://")
-	raw = strings.TrimPrefix(raw, "https://")
-	raw = strings.Trim(raw, "/")
-	return sessionAuditHeaderPlainValue(raw)
-}
-
-func sessionAuditHeaderBetaValue(raw string) string {
-	values := parseStringListSetting(raw)
-	if len(values) == 0 {
-		return sessionAuditHeaderPlainValue(raw)
-	}
-	if len(values) > 8 {
-		values = values[:8]
-	}
-	return sessionAuditHeaderPlainValue(strings.Join(values, ","))
-}
-
-func sessionAuditUserAgentFamily(raw string) string {
-	raw = strings.ToLower(strings.TrimSpace(raw))
-	if raw == "" {
-		return ""
-	}
-	for _, family := range []string{"claude-cli", "codex-tui", "claude-code", "anthropic", "curl", "python", "node", "go-http-client"} {
-		if strings.Contains(raw, family) {
-			return family
-		}
-	}
-	return trimRunes(redactContentModerationSecrets(NormalizeSessionUserAgent(raw)), maxModerationExcerptRunes)
 }
 
 func renderSessionAuditPrompt(cfg *SessionAuditProviderConfig, payload string) string {
@@ -1509,20 +1373,23 @@ func contentModerationSleepWithContext(ctx context.Context, d time.Duration) err
 	}
 }
 
-const sessionAuditDefaultPromptTemplate = `You are a risk control auditor for Claude/Anthropic Messages traffic.
-Evaluate only whether the provided request violates Claude Terms of Service or the Anthropic Usage Policy.
+const sessionAuditDefaultPromptTemplate = `You are a risk control auditor for user intent in Claude/Anthropic Messages requests.
+Evaluate only whether the provided message evidence violates Claude Terms of Service or the Anthropic Usage Policy.
 Do not answer the user's question, do not transform the task, and do not provide advice beyond policy classification.
 
-Block with high confidence when the request or request-context evidence clearly indicates any of these Claude/Anthropic policy violations:
-- credential theft, secret extraction, token/cookie/API-key exfiltration, phishing, malware, unauthorized access, evasion, abuse automation, or other disallowed harmful conduct;
-- sharing, reselling, brokering, pooling, or proxying Claude/Anthropic/Claude Code accounts, API keys, OAuth sessions, or service access through an unauthorized relay or managed intermediary;
+Use only evidence from these message-derived fields when present: system_summary, latest_user_excerpt, and message_summary.
+Do not use transport, gateway, relay, proxy, sub2api, managed instance/domain, API key, account, group, session hash, endpoint, protocol, model, headers, IP, or routing metadata as policy evidence.
+
+Block with high confidence when the message evidence clearly indicates any of these violations:
+- developing, operating, brokering, reselling, pooling, proxying, or sharing Claude/Anthropic/Claude Code accounts, API keys, OAuth sessions, or service access through an unauthorized relay, sub2api-like gateway, managed intermediary, or passthrough service;
+- credential theft, secret extraction, token/cookie/API-key exfiltration, phishing, malware, unauthorized access, evasion, abuse automation, privacy invasion, fraud, or other disallowed harmful conduct;
 - using Claude/Anthropic traffic to build, train, distill, or run a competing model/service in violation of the Terms.
 
-Treat request_context_summary and risk_signals as policy evidence. For example, managed relay headers/domains for a Claude-Code/Claude CLI client, combined with credential headers or shared-service routing, are evidence of unauthorized sharing/proxying of Claude service access even if the user task itself is ordinary coding.
-Do not block ordinary first-party, authorized user requests only because they are software-development tasks.
-If the evidence is ambiguous or confidence is low, default to allow.
+Do not block ordinary first-party software-development tasks, debugging, automation, or benign requests merely because the runtime environment is a relay, proxy, gateway, or sub2api deployment.
+If the message evidence is ambiguous or confidence is low, default to allow.
+The evidence_excerpt must come from system_summary, latest_user_excerpt, or message_summary; if no such evidence exists, use an empty string.
 Return strict JSON only with this schema:
 {"violates":bool,"confidence":number,"categories":[],"reason":"...","evidence_excerpt":"...","recommended_action":"allow|block"}
 
-Request payload:
+Message evidence:
 {{payload}}`
