@@ -193,6 +193,22 @@ type ContentModerationConfigView struct {
 	BlockedKeywords      []string                        `json:"blocked_keywords"`
 	KeywordBlockingMode  string                          `json:"keyword_blocking_mode"`
 	ModelFilter          ContentModerationModelFilter    `json:"model_filter"`
+
+	RiskControlProvider           string   `json:"risk_control_provider"`
+	AuditBaseURL                  string   `json:"audit_base_url"`
+	AuditPath                     string   `json:"audit_path"`
+	AuditModel                    string   `json:"audit_model"`
+	AuditAPIKeyConfigured         bool     `json:"audit_api_key_configured"`
+	AuditAPIKeyCount              int      `json:"audit_api_key_count"`
+	AuditAPIKeyMasks              []string `json:"audit_api_key_masks"`
+	AuditTimeoutMS                int      `json:"audit_timeout_ms"`
+	AuditFailClosed               bool     `json:"audit_fail_closed"`
+	AuditBlockConfidenceThreshold float64  `json:"audit_block_confidence_threshold"`
+	SessionAuditIntervalSeconds   int      `json:"session_audit_interval_seconds"`
+	SessionBlacklistTTLSeconds    int      `json:"session_blacklist_ttl_seconds"`
+	SessionAuditEnabledProtocols  []string `json:"session_audit_enabled_protocols"`
+	AuditMaxInputChars            int      `json:"audit_max_input_chars"`
+	AuditPromptTemplate           string   `json:"audit_prompt_template"`
 }
 
 type ContentModerationAPIKeyStatus struct {
@@ -280,6 +296,24 @@ type UpdateContentModerationConfigInput struct {
 	BlockedKeywords      *[]string                     `json:"blocked_keywords"`
 	KeywordBlockingMode  *string                       `json:"keyword_blocking_mode"`
 	ModelFilter          *ContentModerationModelFilter `json:"model_filter"`
+
+	RiskControlProvider           *string   `json:"risk_control_provider"`
+	AuditBaseURL                  *string   `json:"audit_base_url"`
+	AuditPath                     *string   `json:"audit_path"`
+	AuditModel                    *string   `json:"audit_model"`
+	AuditAPIKey                   *string   `json:"audit_api_key"`
+	AuditAPIKeys                  *[]string `json:"audit_api_keys"`
+	AuditAPIKeysMode              string    `json:"audit_api_keys_mode"`
+	DeleteAuditAPIKeyHashes       *[]string `json:"delete_audit_api_key_hashes"`
+	ClearAuditAPIKey              bool      `json:"clear_audit_api_key"`
+	AuditTimeoutMS                *int      `json:"audit_timeout_ms"`
+	AuditFailClosed               *bool     `json:"audit_fail_closed"`
+	AuditBlockConfidenceThreshold *float64  `json:"audit_block_confidence_threshold"`
+	SessionAuditIntervalSeconds   *int      `json:"session_audit_interval_seconds"`
+	SessionBlacklistTTLSeconds    *int      `json:"session_blacklist_ttl_seconds"`
+	SessionAuditEnabledProtocols  *[]string `json:"session_audit_enabled_protocols"`
+	AuditMaxInputChars            *int      `json:"audit_max_input_chars"`
+	AuditPromptTemplate           *string   `json:"audit_prompt_template"`
 }
 
 type ContentModerationModelFilter struct {
@@ -592,7 +626,7 @@ func (s *ContentModerationService) GetConfig(ctx context.Context) (*ContentModer
 	if err != nil {
 		return nil, err
 	}
-	return s.configView(cfg), nil
+	return s.configView(ctx, cfg), nil
 }
 
 func (s *ContentModerationService) UpdateConfig(ctx context.Context, input UpdateContentModerationConfigInput) (*ContentModerationConfigView, error) {
@@ -705,10 +739,20 @@ func (s *ContentModerationService) UpdateConfig(ctx context.Context, input Updat
 	if err != nil {
 		return nil, fmt.Errorf("marshal content moderation config: %w", err)
 	}
-	if err := s.settingRepo.Set(ctx, SettingKeyContentModerationConfig, string(raw)); err != nil {
+	updates := map[string]string{
+		SettingKeyContentModerationConfig: string(raw),
+	}
+	sessionAuditUpdates, err := s.sessionAuditProviderConfigUpdates(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	for key, value := range sessionAuditUpdates {
+		updates[key] = value
+	}
+	if err := s.settingRepo.SetMultiple(ctx, updates); err != nil {
 		return nil, fmt.Errorf("save content moderation config: %w", err)
 	}
-	return s.configView(cfg), nil
+	return s.configView(ctx, cfg), nil
 }
 
 func (s *ContentModerationService) TestAPIKeys(ctx context.Context, input TestContentModerationAPIKeysInput) (*TestContentModerationAPIKeysResult, error) {
@@ -1487,6 +1531,145 @@ func (s *ContentModerationService) isRiskControlEnabled(ctx context.Context) boo
 	return raw == "true"
 }
 
+func (s *ContentModerationService) sessionAuditProviderConfigUpdates(ctx context.Context, input UpdateContentModerationConfigInput) (map[string]string, error) {
+	if !input.hasSessionAuditProviderUpdates() {
+		return nil, nil
+	}
+	sessionCfg, err := s.loadSessionAuditProviderConfig(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("load session audit config: %w", err)
+	}
+	if input.RiskControlProvider != nil {
+		sessionCfg.Provider = strings.TrimSpace(*input.RiskControlProvider)
+	}
+	if input.AuditBaseURL != nil {
+		sessionCfg.BaseURL = strings.TrimSpace(*input.AuditBaseURL)
+	}
+	if input.AuditPath != nil {
+		sessionCfg.Path = strings.TrimSpace(*input.AuditPath)
+	}
+	if input.AuditModel != nil {
+		sessionCfg.Model = strings.TrimSpace(*input.AuditModel)
+	}
+	if input.AuditTimeoutMS != nil {
+		sessionCfg.TimeoutMS = *input.AuditTimeoutMS
+	}
+	if input.AuditFailClosed != nil {
+		sessionCfg.FailClosed = *input.AuditFailClosed
+	}
+	if input.AuditBlockConfidenceThreshold != nil {
+		sessionCfg.BlockConfidenceThreshold = *input.AuditBlockConfidenceThreshold
+	}
+	if input.SessionAuditIntervalSeconds != nil {
+		sessionCfg.SessionAuditInterval = time.Duration(*input.SessionAuditIntervalSeconds) * time.Second
+	}
+	if input.SessionBlacklistTTLSeconds != nil {
+		sessionCfg.SessionBlacklistTTL = time.Duration(*input.SessionBlacklistTTLSeconds) * time.Second
+	}
+	if input.SessionAuditEnabledProtocols != nil {
+		sessionCfg.EnabledProtocols = append([]string(nil), *input.SessionAuditEnabledProtocols...)
+	}
+	if input.AuditMaxInputChars != nil {
+		sessionCfg.AuditMaxInputChars = *input.AuditMaxInputChars
+	}
+	if input.AuditPromptTemplate != nil {
+		sessionCfg.PromptTemplate = strings.TrimSpace(*input.AuditPromptTemplate)
+	}
+	if input.ClearAuditAPIKey {
+		sessionCfg.APIKeys = []string{}
+	} else {
+		apiKeysMode := normalizeContentModerationAPIKeysMode(input.AuditAPIKeysMode)
+		if input.DeleteAuditAPIKeyHashes != nil && apiKeysMode != contentModerationAPIKeysModeReplace {
+			sessionCfg.APIKeys = deleteModerationAPIKeysByHash(sessionCfg.APIKeys, *input.DeleteAuditAPIKeyHashes)
+		}
+		if input.AuditAPIKeys != nil {
+			if apiKeysMode == contentModerationAPIKeysModeReplace {
+				sessionCfg.APIKeys = normalizeModerationAPIKeys(*input.AuditAPIKeys)
+			} else {
+				sessionCfg.APIKeys = normalizeModerationAPIKeys(append(sessionCfg.APIKeys, *input.AuditAPIKeys...))
+			}
+		}
+		if input.AuditAPIKey != nil && strings.TrimSpace(*input.AuditAPIKey) != "" {
+			sessionCfg.APIKeys = normalizeModerationAPIKeys(append(sessionCfg.APIKeys, *input.AuditAPIKey))
+		}
+	}
+	sessionCfg.normalize()
+	if err := validateSessionAuditProviderConfig(sessionCfg); err != nil {
+		return nil, err
+	}
+	return map[string]string{
+		SettingKeyRiskControlProvider:           sessionCfg.Provider,
+		SettingKeyAuditBaseURL:                  sessionCfg.BaseURL,
+		SettingKeyAuditPath:                     sessionCfg.Path,
+		SettingKeyAuditModel:                    sessionCfg.Model,
+		SettingKeyAuditAPIKeys:                  marshalStringListSetting(sessionCfg.APIKeys),
+		SettingKeyAuditTimeoutMS:                fmt.Sprintf("%d", sessionCfg.TimeoutMS),
+		SettingKeyAuditFailClosed:               fmt.Sprintf("%t", sessionCfg.FailClosed),
+		SettingKeyAuditBlockConfidenceThreshold: fmt.Sprintf("%.4g", sessionCfg.BlockConfidenceThreshold),
+		SettingKeySessionAuditIntervalSeconds:   fmt.Sprintf("%d", int(sessionCfg.SessionAuditInterval.Seconds())),
+		SettingKeySessionBlacklistTTLSeconds:    fmt.Sprintf("%d", int(sessionCfg.SessionBlacklistTTL.Seconds())),
+		SettingKeySessionAuditEnabledProtocols:  marshalStringListSetting(sessionCfg.EnabledProtocols),
+		SettingKeyAuditMaxInputChars:            fmt.Sprintf("%d", sessionCfg.AuditMaxInputChars),
+		SettingKeyAuditPromptTemplate:           sessionCfg.PromptTemplate,
+	}, nil
+}
+
+func (input UpdateContentModerationConfigInput) hasSessionAuditProviderUpdates() bool {
+	return input.RiskControlProvider != nil ||
+		input.AuditBaseURL != nil ||
+		input.AuditPath != nil ||
+		input.AuditModel != nil ||
+		input.AuditAPIKey != nil ||
+		input.AuditAPIKeys != nil ||
+		input.AuditAPIKeysMode != "" ||
+		input.DeleteAuditAPIKeyHashes != nil ||
+		input.ClearAuditAPIKey ||
+		input.AuditTimeoutMS != nil ||
+		input.AuditFailClosed != nil ||
+		input.AuditBlockConfidenceThreshold != nil ||
+		input.SessionAuditIntervalSeconds != nil ||
+		input.SessionBlacklistTTLSeconds != nil ||
+		input.SessionAuditEnabledProtocols != nil ||
+		input.AuditMaxInputChars != nil ||
+		input.AuditPromptTemplate != nil
+}
+
+func validateSessionAuditProviderConfig(cfg *SessionAuditProviderConfig) error {
+	if cfg == nil {
+		return infraerrors.BadRequest("INVALID_SESSION_AUDIT_CONFIG", "会话审计配置不能为空")
+	}
+	switch cfg.Provider {
+	case RiskControlProviderLegacyModeration, RiskControlProviderOpenAIResponsesSessionAudit:
+	default:
+		return infraerrors.BadRequest("INVALID_RISK_CONTROL_PROVIDER", "风控 Provider 无效")
+	}
+	if _, err := url.ParseRequestURI(cfg.BaseURL); err != nil {
+		return infraerrors.BadRequest("INVALID_AUDIT_BASE_URL", "会话审计 Base URL 无效")
+	}
+	if !strings.HasPrefix(cfg.Path, "/") {
+		return infraerrors.BadRequest("INVALID_AUDIT_PATH", "会话审计路径必须以 / 开头")
+	}
+	if cfg.TimeoutMS <= 0 || cfg.TimeoutMS > maxContentModerationTimeoutMS {
+		return infraerrors.BadRequest("INVALID_AUDIT_TIMEOUT", "会话审计超时必须在 1-30000ms 内")
+	}
+	if cfg.BlockConfidenceThreshold < 0 || cfg.BlockConfidenceThreshold > 1 {
+		return infraerrors.BadRequest("INVALID_AUDIT_THRESHOLD", "会话审计拦截置信度必须在 0-1 之间")
+	}
+	if cfg.AuditMaxInputChars <= 0 {
+		return infraerrors.BadRequest("INVALID_AUDIT_MAX_INPUT", "会话审计最大输入字符数必须大于 0")
+	}
+	return nil
+}
+
+func marshalStringListSetting(values []string) string {
+	normalized := filterEmptyStrings(values)
+	raw, err := json.Marshal(normalized)
+	if err != nil {
+		return "[]"
+	}
+	return string(raw)
+}
+
 func (s *ContentModerationService) validateConfig(ctx context.Context, cfg *ContentModerationConfig) error {
 	if cfg == nil {
 		return infraerrors.BadRequest("INVALID_CONTENT_MODERATION_CONFIG", "内容审计配置不能为空")
@@ -2159,7 +2342,7 @@ func (s *ContentModerationService) ensureAPIKeyHealthLocked(hash string, masked 
 	return state
 }
 
-func (s *ContentModerationService) configView(cfg *ContentModerationConfig) *ContentModerationConfigView {
+func (s *ContentModerationService) configView(ctx context.Context, cfg *ContentModerationConfig) *ContentModerationConfigView {
 	keys := cfg.apiKeys()
 	masks := make([]string, 0, len(keys))
 	for _, key := range keys {
@@ -2168,6 +2351,14 @@ func (s *ContentModerationService) configView(cfg *ContentModerationConfig) *Con
 	apiKeyMasked := ""
 	if len(masks) > 0 {
 		apiKeyMasked = masks[0]
+	}
+	sessionCfg := defaultSessionAuditProviderConfig()
+	if loaded, err := s.loadSessionAuditProviderConfig(ctx); err == nil && loaded != nil {
+		sessionCfg = loaded
+	}
+	auditKeyMasks := make([]string, 0, len(sessionCfg.APIKeys))
+	for _, key := range sessionCfg.APIKeys {
+		auditKeyMasks = append(auditKeyMasks, maskSecretTail(key))
 	}
 	return &ContentModerationConfigView{
 		Enabled:              cfg.Enabled,
@@ -2200,6 +2391,22 @@ func (s *ContentModerationService) configView(cfg *ContentModerationConfig) *Con
 		BlockedKeywords:      append([]string(nil), cfg.BlockedKeywords...),
 		KeywordBlockingMode:  cfg.KeywordBlockingMode,
 		ModelFilter:          cloneContentModerationModelFilter(cfg.ModelFilter),
+
+		RiskControlProvider:           sessionCfg.Provider,
+		AuditBaseURL:                  sessionCfg.BaseURL,
+		AuditPath:                     sessionCfg.Path,
+		AuditModel:                    sessionCfg.Model,
+		AuditAPIKeyConfigured:         len(sessionCfg.APIKeys) > 0,
+		AuditAPIKeyCount:              len(sessionCfg.APIKeys),
+		AuditAPIKeyMasks:              auditKeyMasks,
+		AuditTimeoutMS:                sessionCfg.TimeoutMS,
+		AuditFailClosed:               sessionCfg.FailClosed,
+		AuditBlockConfidenceThreshold: sessionCfg.BlockConfidenceThreshold,
+		SessionAuditIntervalSeconds:   int(sessionCfg.SessionAuditInterval.Seconds()),
+		SessionBlacklistTTLSeconds:    int(sessionCfg.SessionBlacklistTTL.Seconds()),
+		SessionAuditEnabledProtocols:  append([]string(nil), sessionCfg.EnabledProtocols...),
+		AuditMaxInputChars:            sessionCfg.AuditMaxInputChars,
+		AuditPromptTemplate:           sessionCfg.PromptTemplate,
 	}
 }
 

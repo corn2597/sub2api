@@ -3,6 +3,7 @@ import { apiClient } from '../client'
 export type ModerationMode = 'off' | 'observe' | 'pre_block'
 export type KeywordBlockingMode = 'keyword_only' | 'keyword_and_api' | 'api_only'
 export type ContentModerationModelFilterType = 'all' | 'include' | 'exclude'
+export type RiskControlProvider = 'legacy_moderation' | 'openai_responses_session_audit'
 
 export interface ContentModerationModelFilter {
   type: ContentModerationModelFilterType
@@ -40,6 +41,21 @@ export interface ContentModerationConfig {
   blocked_keywords: string[]
   keyword_blocking_mode: KeywordBlockingMode
   model_filter: ContentModerationModelFilter
+  risk_control_provider: RiskControlProvider
+  audit_base_url: string
+  audit_path: string
+  audit_model: string
+  audit_api_key_configured: boolean
+  audit_api_key_count: number
+  audit_api_key_masks: string[]
+  audit_timeout_ms: number
+  audit_fail_closed: boolean
+  audit_block_confidence_threshold: number
+  session_audit_interval_seconds: number
+  session_blacklist_ttl_seconds: number
+  session_audit_enabled_protocols: string[]
+  audit_max_input_chars: number
+  audit_prompt_template: string
 }
 
 export type ContentModerationAPIKeyStatusValue = 'unknown' | 'ok' | 'error' | 'frozen'
@@ -115,6 +131,23 @@ export interface UpdateContentModerationConfig {
   blocked_keywords?: string[]
   keyword_blocking_mode?: KeywordBlockingMode
   model_filter?: ContentModerationModelFilter
+  risk_control_provider?: RiskControlProvider
+  audit_base_url?: string
+  audit_path?: string
+  audit_model?: string
+  audit_api_key?: string
+  audit_api_keys?: string[]
+  audit_api_keys_mode?: 'append' | 'replace'
+  delete_audit_api_key_hashes?: string[]
+  clear_audit_api_key?: boolean
+  audit_timeout_ms?: number
+  audit_fail_closed?: boolean
+  audit_block_confidence_threshold?: number
+  session_audit_interval_seconds?: number
+  session_blacklist_ttl_seconds?: number
+  session_audit_enabled_protocols?: string[]
+  audit_max_input_chars?: number
+  audit_prompt_template?: string
 }
 
 export interface ContentModerationRuntimeStatus {

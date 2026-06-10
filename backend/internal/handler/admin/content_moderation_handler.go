@@ -50,6 +50,24 @@ type contentModerationConfigRequest struct {
 	BlockedKeywords      *[]string                             `json:"blocked_keywords"`
 	KeywordBlockingMode  *string                               `json:"keyword_blocking_mode"`
 	ModelFilter          *service.ContentModerationModelFilter `json:"model_filter"`
+
+	RiskControlProvider           *string   `json:"risk_control_provider"`
+	AuditBaseURL                  *string   `json:"audit_base_url"`
+	AuditPath                     *string   `json:"audit_path"`
+	AuditModel                    *string   `json:"audit_model"`
+	AuditAPIKey                   *string   `json:"audit_api_key"`
+	AuditAPIKeys                  *[]string `json:"audit_api_keys"`
+	AuditAPIKeysMode              string    `json:"audit_api_keys_mode"`
+	DeleteAuditAPIKeyHashes       *[]string `json:"delete_audit_api_key_hashes"`
+	ClearAuditAPIKey              bool      `json:"clear_audit_api_key"`
+	AuditTimeoutMS                *int      `json:"audit_timeout_ms"`
+	AuditFailClosed               *bool     `json:"audit_fail_closed"`
+	AuditBlockConfidenceThreshold *float64  `json:"audit_block_confidence_threshold"`
+	SessionAuditIntervalSeconds   *int      `json:"session_audit_interval_seconds"`
+	SessionBlacklistTTLSeconds    *int      `json:"session_blacklist_ttl_seconds"`
+	SessionAuditEnabledProtocols  *[]string `json:"session_audit_enabled_protocols"`
+	AuditMaxInputChars            *int      `json:"audit_max_input_chars"`
+	AuditPromptTemplate           *string   `json:"audit_prompt_template"`
 }
 
 type contentModerationAPIKeyTestRequest struct {
@@ -111,6 +129,24 @@ func (h *ContentModerationHandler) UpdateConfig(c *gin.Context) {
 		BlockedKeywords:      req.BlockedKeywords,
 		KeywordBlockingMode:  req.KeywordBlockingMode,
 		ModelFilter:          req.ModelFilter,
+
+		RiskControlProvider:           req.RiskControlProvider,
+		AuditBaseURL:                  req.AuditBaseURL,
+		AuditPath:                     req.AuditPath,
+		AuditModel:                    req.AuditModel,
+		AuditAPIKey:                   req.AuditAPIKey,
+		AuditAPIKeys:                  req.AuditAPIKeys,
+		AuditAPIKeysMode:              req.AuditAPIKeysMode,
+		DeleteAuditAPIKeyHashes:       req.DeleteAuditAPIKeyHashes,
+		ClearAuditAPIKey:              req.ClearAuditAPIKey,
+		AuditTimeoutMS:                req.AuditTimeoutMS,
+		AuditFailClosed:               req.AuditFailClosed,
+		AuditBlockConfidenceThreshold: req.AuditBlockConfidenceThreshold,
+		SessionAuditIntervalSeconds:   req.SessionAuditIntervalSeconds,
+		SessionBlacklistTTLSeconds:    req.SessionBlacklistTTLSeconds,
+		SessionAuditEnabledProtocols:  req.SessionAuditEnabledProtocols,
+		AuditMaxInputChars:            req.AuditMaxInputChars,
+		AuditPromptTemplate:           req.AuditPromptTemplate,
 	})
 	if err != nil {
 		response.ErrorFrom(c, err)

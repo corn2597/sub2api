@@ -1731,6 +1731,88 @@ func TestContentModerationUpdateConfig_SavesCustomThresholds(t *testing.T) {
 	require.NotContains(t, saved.Thresholds, "unknown")
 }
 
+func TestContentModerationUpdateConfig_SavesSessionAuditProviderSettings(t *testing.T) {
+	cfg := defaultContentModerationConfig()
+	rawCfg, err := json.Marshal(cfg)
+	require.NoError(t, err)
+
+	repo := &contentModerationTestSettingRepo{values: map[string]string{
+		SettingKeyContentModerationConfig: string(rawCfg),
+		SettingKeyAuditAPIKeys:            `["sk-audit-old"]`,
+	}}
+	svc := NewContentModerationService(repo, nil, nil, nil, nil, nil, nil)
+
+	provider := RiskControlProviderOpenAIResponsesSessionAudit
+	baseURL := "https://audit.example.com"
+	path := "/v1/responses"
+	model := "gpt-5-mini"
+	keys := []string{"sk-audit-new"}
+	timeoutMS := 4200
+	failClosed := true
+	threshold := 0.82
+	intervalSeconds := 120
+	blacklistTTLSeconds := 3600
+	protocols := []string{ContentModerationProtocolAnthropicMessages}
+	maxInputChars := 15000
+	promptTemplate := "Audit the session context"
+
+	view, err := svc.UpdateConfig(context.Background(), UpdateContentModerationConfigInput{
+		RiskControlProvider:           &provider,
+		AuditBaseURL:                  &baseURL,
+		AuditPath:                     &path,
+		AuditModel:                    &model,
+		AuditAPIKeys:                  &keys,
+		AuditTimeoutMS:                &timeoutMS,
+		AuditFailClosed:               &failClosed,
+		AuditBlockConfidenceThreshold: &threshold,
+		SessionAuditIntervalSeconds:   &intervalSeconds,
+		SessionBlacklistTTLSeconds:    &blacklistTTLSeconds,
+		SessionAuditEnabledProtocols:  &protocols,
+		AuditMaxInputChars:            &maxInputChars,
+		AuditPromptTemplate:           &promptTemplate,
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, RiskControlProviderOpenAIResponsesSessionAudit, view.RiskControlProvider)
+	require.Equal(t, baseURL, view.AuditBaseURL)
+	require.Equal(t, path, view.AuditPath)
+	require.Equal(t, model, view.AuditModel)
+	require.True(t, view.AuditAPIKeyConfigured)
+	require.Equal(t, 2, view.AuditAPIKeyCount)
+	require.Equal(t, []string{maskSecretTail("sk-audit-old"), maskSecretTail("sk-audit-new")}, view.AuditAPIKeyMasks)
+	require.Equal(t, timeoutMS, view.AuditTimeoutMS)
+	require.True(t, view.AuditFailClosed)
+	require.Equal(t, threshold, view.AuditBlockConfidenceThreshold)
+	require.Equal(t, intervalSeconds, view.SessionAuditIntervalSeconds)
+	require.Equal(t, blacklistTTLSeconds, view.SessionBlacklistTTLSeconds)
+	require.Equal(t, protocols, view.SessionAuditEnabledProtocols)
+	require.Equal(t, maxInputChars, view.AuditMaxInputChars)
+	require.Equal(t, promptTemplate, view.AuditPromptTemplate)
+
+	viewRaw, err := json.Marshal(view)
+	require.NoError(t, err)
+	require.NotContains(t, string(viewRaw), "sk-audit-old")
+	require.NotContains(t, string(viewRaw), "sk-audit-new")
+
+	require.Equal(t, provider, repo.values[SettingKeyRiskControlProvider])
+	require.Equal(t, baseURL, repo.values[SettingKeyAuditBaseURL])
+	require.Equal(t, path, repo.values[SettingKeyAuditPath])
+	require.Equal(t, model, repo.values[SettingKeyAuditModel])
+	require.Equal(t, strconv.Itoa(timeoutMS), repo.values[SettingKeyAuditTimeoutMS])
+	require.Equal(t, strconv.Itoa(intervalSeconds), repo.values[SettingKeySessionAuditIntervalSeconds])
+	require.Equal(t, strconv.Itoa(blacklistTTLSeconds), repo.values[SettingKeySessionBlacklistTTLSeconds])
+	require.Equal(t, strconv.Itoa(maxInputChars), repo.values[SettingKeyAuditMaxInputChars])
+	require.Equal(t, promptTemplate, repo.values[SettingKeyAuditPromptTemplate])
+
+	var savedKeys []string
+	require.NoError(t, json.Unmarshal([]byte(repo.values[SettingKeyAuditAPIKeys]), &savedKeys))
+	require.Equal(t, []string{"sk-audit-old", "sk-audit-new"}, savedKeys)
+
+	var savedProtocols []string
+	require.NoError(t, json.Unmarshal([]byte(repo.values[SettingKeySessionAuditEnabledProtocols]), &savedProtocols))
+	require.Equal(t, protocols, savedProtocols)
+}
+
 func TestExtractContentModerationInput_AnthropicImageSourceOnlyParticipatesInMemory(t *testing.T) {
 	body := []byte(`{
 		"messages": [

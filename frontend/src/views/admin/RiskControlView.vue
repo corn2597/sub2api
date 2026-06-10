@@ -399,18 +399,25 @@
                 <p class="mt-2 text-xs leading-5 text-gray-500 dark:text-gray-400">{{ modeDescription(configForm.mode) }}</p>
               </div>
               <div>
+                <label class="input-label">{{ t('admin.riskControl.provider') }}</label>
+                <Select v-model="configForm.risk_control_provider" :options="riskProviderOptions" />
+                <p class="mt-2 text-xs leading-5 text-gray-500 dark:text-gray-400">
+                  {{ configForm.risk_control_provider === 'openai_responses_session_audit' ? t('admin.riskControl.providerSessionAuditHint') : t('admin.riskControl.providerLegacyHint') }}
+                </p>
+              </div>
+              <div v-if="configForm.risk_control_provider === 'legacy_moderation'">
                 <label class="input-label">{{ t('admin.riskControl.baseUrl') }}</label>
                 <input v-model.trim="configForm.base_url" type="url" class="input" placeholder="https://api.openai.com" />
               </div>
-              <div>
+              <div v-if="configForm.risk_control_provider === 'legacy_moderation'">
                 <label class="input-label">{{ t('admin.riskControl.model') }}</label>
                 <input v-model.trim="configForm.model" type="text" class="input" placeholder="omni-moderation-latest" />
               </div>
-              <div>
+              <div v-if="configForm.risk_control_provider === 'legacy_moderation'">
                 <label class="input-label">{{ t('admin.riskControl.timeoutMs') }}</label>
                 <input v-model.number="configForm.timeout_ms" type="number" min="500" max="30000" class="input" />
               </div>
-              <div>
+              <div v-if="configForm.risk_control_provider === 'legacy_moderation'">
                 <label class="input-label">{{ t('admin.riskControl.retryCount') }}</label>
                 <input v-model.number="configForm.retry_count" type="number" min="0" max="5" class="input" />
               </div>
@@ -423,7 +430,144 @@
               </div>
             </div>
 
-            <div class="overflow-hidden rounded-xl border border-gray-100 bg-white shadow-sm dark:border-dark-700 dark:bg-dark-800">
+            <div
+              v-if="configForm.risk_control_provider === 'openai_responses_session_audit'"
+              class="overflow-hidden rounded-xl border border-sky-100 bg-white shadow-sm dark:border-sky-900/50 dark:bg-dark-800"
+            >
+              <div class="flex flex-col gap-4 border-b border-sky-100 bg-sky-50 px-4 py-4 dark:border-sky-900/50 dark:bg-sky-900/10 lg:flex-row lg:items-center lg:justify-between">
+                <div class="flex items-start gap-3">
+                  <span class="mt-0.5 flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300">
+                    <Icon name="shield" size="md" />
+                  </span>
+                  <div>
+                    <label class="text-sm font-semibold text-gray-900 dark:text-white">{{ t('admin.riskControl.sessionAuditTitle') }}</label>
+                    <p class="mt-1 max-w-3xl text-xs leading-5 text-gray-500 dark:text-gray-400">
+                      {{ t('admin.riskControl.sessionAuditHint') }}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  v-if="configForm.audit_api_key_configured"
+                  type="button"
+                  class="btn btn-secondary inline-flex items-center gap-2"
+                  @click="toggleClearAuditApiKey"
+                >
+                  <Icon :name="configForm.clear_audit_api_key ? 'x' : 'trash'" size="sm" />
+                  {{ configForm.clear_audit_api_key ? t('admin.riskControl.keepApiKey') : t('admin.riskControl.clearApiKey') }}
+                </button>
+              </div>
+
+              <div class="grid grid-cols-1 gap-4 p-4 lg:grid-cols-2">
+                <div>
+                  <label class="input-label">{{ t('admin.riskControl.auditBaseUrl') }}</label>
+                  <input v-model.trim="configForm.audit_base_url" type="url" class="input" placeholder="https://api.openai.com" />
+                </div>
+                <div>
+                  <label class="input-label">{{ t('admin.riskControl.auditPath') }}</label>
+                  <input v-model.trim="configForm.audit_path" type="text" class="input" placeholder="/v1/responses" />
+                </div>
+                <div>
+                  <label class="input-label">{{ t('admin.riskControl.auditModel') }}</label>
+                  <input v-model.trim="configForm.audit_model" type="text" class="input" placeholder="gpt-5.4" />
+                </div>
+                <div>
+                  <label class="input-label">{{ t('admin.riskControl.auditTimeoutMs') }}</label>
+                  <input v-model.number="configForm.audit_timeout_ms" type="number" min="500" max="30000" class="input" />
+                </div>
+                <div>
+                  <label class="input-label">{{ t('admin.riskControl.auditBlockConfidenceThreshold') }}</label>
+                  <input v-model.number="configForm.audit_block_confidence_threshold" type="number" min="0" max="1" step="0.01" class="input" />
+                </div>
+                <div>
+                  <label class="input-label">{{ t('admin.riskControl.sessionAuditIntervalSeconds') }}</label>
+                  <input v-model.number="configForm.session_audit_interval_seconds" type="number" min="0" class="input" />
+                </div>
+                <div>
+                  <label class="input-label">{{ t('admin.riskControl.sessionBlacklistTTLSeconds') }}</label>
+                  <input v-model.number="configForm.session_blacklist_ttl_seconds" type="number" min="0" class="input" />
+                </div>
+                <div>
+                  <label class="input-label">{{ t('admin.riskControl.auditMaxInputChars') }}</label>
+                  <input v-model.number="configForm.audit_max_input_chars" type="number" min="1" class="input" />
+                </div>
+                <div class="lg:col-span-2">
+                  <label class="input-label">{{ t('admin.riskControl.sessionAuditEnabledProtocols') }}</label>
+                  <textarea
+                    v-model="configForm.session_audit_enabled_protocols_text"
+                    class="input min-h-20 resize-y font-mono text-sm"
+                    placeholder="anthropic_messages"
+                  ></textarea>
+                  <p class="mt-2 text-xs leading-5 text-gray-500 dark:text-gray-400">{{ t('admin.riskControl.sessionAuditEnabledProtocolsHint') }}</p>
+                </div>
+                <div class="lg:col-span-2">
+                  <div class="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <label class="input-label mb-0">{{ t('admin.riskControl.auditApiKeys') }}</label>
+                    <div class="inline-flex w-fit rounded-lg bg-gray-100 p-1 shadow-sm dark:bg-dark-900">
+                      <button
+                        type="button"
+                        class="rounded-md px-3 py-1.5 text-xs font-medium transition-colors"
+                        :class="configForm.audit_api_keys_mode === 'append' ? 'bg-primary-500 text-white shadow-sm' : 'text-gray-600 hover:bg-white dark:text-gray-300 dark:hover:bg-dark-700'"
+                        :disabled="configForm.clear_audit_api_key"
+                        @click="setAuditAPIKeysMode('append')"
+                      >
+                        {{ t('admin.riskControl.apiKeysModeAppend') }}
+                      </button>
+                      <button
+                        type="button"
+                        class="rounded-md px-3 py-1.5 text-xs font-medium transition-colors"
+                        :class="configForm.audit_api_keys_mode === 'replace' ? 'bg-amber-500 text-white shadow-sm' : 'text-gray-600 hover:bg-white dark:text-gray-300 dark:hover:bg-dark-700'"
+                        :disabled="configForm.clear_audit_api_key"
+                        @click="setAuditAPIKeysMode('replace')"
+                      >
+                        {{ t('admin.riskControl.apiKeysModeReplace') }}
+                      </button>
+                    </div>
+                  </div>
+                  <textarea
+                    v-model="configForm.audit_api_keys_text"
+                    class="input min-h-28 resize-y font-mono text-sm"
+                    :placeholder="auditApiKeysPlaceholder"
+                    autocomplete="new-password"
+                    :disabled="configForm.clear_audit_api_key"
+                  ></textarea>
+                  <div class="mt-2 flex flex-wrap items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+                    <span class="inline-flex rounded-md bg-gray-100 px-2 py-1 dark:bg-dark-700">
+                      {{ t('admin.riskControl.inputApiKeyCount', { count: inputAuditApiKeyCount }) }}
+                    </span>
+                    <span v-if="configForm.audit_api_key_configured" class="inline-flex rounded-md bg-gray-100 px-2 py-1 dark:bg-dark-700">
+                      {{ t('admin.riskControl.storedApiKeyCount', { count: configForm.audit_api_key_count }) }}
+                    </span>
+                    <span v-for="mask in configForm.audit_api_key_masks" :key="mask" class="inline-flex rounded-md bg-white px-2 py-1 font-mono shadow-sm dark:bg-dark-900">
+                      {{ mask }}
+                    </span>
+                    <span v-if="configForm.clear_audit_api_key" class="inline-flex rounded-md bg-red-50 px-2 py-1 text-red-700 dark:bg-red-900/20 dark:text-red-300">
+                      {{ t('admin.riskControl.apiKeyWillClear') }}
+                    </span>
+                    <span v-if="configForm.audit_api_keys_mode === 'replace'" class="inline-flex rounded-md bg-amber-50 px-2 py-1 text-amber-700 dark:bg-amber-900/20 dark:text-amber-300">
+                      {{ t('admin.riskControl.apiKeysReplaceWarning') }}
+                    </span>
+                    <span>{{ auditApiKeysModeHint }}</span>
+                  </div>
+                </div>
+                <div class="lg:col-span-2">
+                  <label class="input-label">{{ t('admin.riskControl.auditPromptTemplate') }}</label>
+                  <textarea
+                    v-model="configForm.audit_prompt_template"
+                    class="input min-h-28 resize-y font-mono text-xs"
+                    :placeholder="t('admin.riskControl.auditPromptTemplatePlaceholder')"
+                  ></textarea>
+                </div>
+                <div class="flex items-center justify-between rounded-lg border border-gray-100 p-4 dark:border-dark-700 lg:col-span-2">
+                  <div>
+                    <p class="text-sm font-medium text-gray-900 dark:text-white">{{ t('admin.riskControl.auditFailClosed') }}</p>
+                    <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.riskControl.auditFailClosedHint') }}</p>
+                  </div>
+                  <Toggle v-model="configForm.audit_fail_closed" />
+                </div>
+              </div>
+            </div>
+
+            <div v-if="configForm.risk_control_provider === 'legacy_moderation'" class="overflow-hidden rounded-xl border border-gray-100 bg-white shadow-sm dark:border-dark-700 dark:bg-dark-800">
               <div class="flex flex-col gap-4 border-b border-gray-100 bg-gray-50 px-4 py-4 dark:border-dark-700 dark:bg-dark-800/60 lg:flex-row lg:items-center lg:justify-between">
                 <div class="flex items-start gap-3">
                   <span class="mt-0.5 flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg bg-primary-50 text-primary-600 dark:bg-primary-900/30 dark:text-primary-300">
@@ -1126,6 +1270,7 @@ import type {
   ContentModerationTestAuditResult,
   KeywordBlockingMode,
   ModerationMode,
+  RiskControlProvider,
   UpdateContentModerationConfig,
 } from '@/api/admin/riskControl'
 import type { AdminGroup, SelectOption } from '@/types'
@@ -1209,6 +1354,7 @@ let statusTimer: number | null = null
 const configForm = reactive({
   enabled: false,
   mode: 'pre_block' as ModerationMode,
+  risk_control_provider: 'legacy_moderation' as RiskControlProvider,
   base_url: 'https://api.openai.com',
   model: 'omni-moderation-latest',
   api_keys_text: '',
@@ -1219,6 +1365,23 @@ const configForm = reactive({
   api_key_statuses: [] as ContentModerationAPIKeyStatus[],
   api_keys_mode: 'append' as APIKeysWriteMode,
   clear_api_key: false,
+  audit_base_url: 'https://api.openai.com',
+  audit_path: '/v1/responses',
+  audit_model: '',
+  audit_api_keys_text: '',
+  audit_api_key_configured: false,
+  audit_api_key_count: 0,
+  audit_api_key_masks: [] as string[],
+  audit_api_keys_mode: 'append' as APIKeysWriteMode,
+  clear_audit_api_key: false,
+  audit_timeout_ms: 3000,
+  audit_fail_closed: false,
+  audit_block_confidence_threshold: 0.7,
+  session_audit_interval_seconds: 300,
+  session_blacklist_ttl_seconds: 0,
+  session_audit_enabled_protocols_text: 'anthropic_messages',
+  audit_max_input_chars: 12000,
+  audit_prompt_template: '',
   timeout_ms: 3000,
   retry_count: 2,
   sample_rate: 100,
@@ -1273,6 +1436,11 @@ const modeOptions = computed<SelectOption[]>(() => [
   { value: 'pre_block', label: t('admin.riskControl.modePreBlock') },
   { value: 'observe', label: t('admin.riskControl.modeObserve') },
   { value: 'off', label: t('admin.riskControl.modeOff') },
+])
+
+const riskProviderOptions = computed<SelectOption[]>(() => [
+  { value: 'legacy_moderation', label: t('admin.riskControl.providerLegacy') },
+  { value: 'openai_responses_session_audit', label: t('admin.riskControl.providerSessionAudit') },
 ])
 
 const keywordBlockingModeOptions = computed<Array<{ value: KeywordBlockingMode; label: string; description: string }>>(() => [
@@ -1419,6 +1587,8 @@ const filteredGroups = computed(() => {
 
 const inputApiKeyCount = computed(() => parseApiKeys(configForm.api_keys_text).length)
 
+const inputAuditApiKeyCount = computed(() => parseApiKeys(configForm.audit_api_keys_text).length)
+
 const blockedKeywordList = computed(() => parseBlockedKeywords(configForm.blocked_keywords_text))
 
 const blockedKeywordCount = computed(() => blockedKeywordList.value.length)
@@ -1426,6 +1596,10 @@ const blockedKeywordCount = computed(() => blockedKeywordList.value.length)
 const pendingDeletedApiKeyCount = computed(() => pendingDeleteApiKeyHashes.value.length)
 
 const effectiveStoredApiKeyCount = computed(() => Math.max(0, configForm.api_key_count - pendingDeletedApiKeyCount.value))
+
+const effectiveStoredAuditApiKeyCount = computed(() => configForm.clear_audit_api_key ? 0 : configForm.audit_api_key_count)
+
+const auditProtocolList = computed(() => parseTextList(configForm.session_audit_enabled_protocols_text))
 
 const apiKeysPlaceholder = computed(() => (
   configForm.api_keys_mode === 'replace'
@@ -1437,6 +1611,18 @@ const apiKeysModeHint = computed(() => (
   configForm.api_keys_mode === 'replace'
     ? t('admin.riskControl.apiKeysModeReplaceHint')
     : t('admin.riskControl.apiKeysModeAppendHint')
+))
+
+const auditApiKeysModeHint = computed(() => (
+  configForm.audit_api_keys_mode === 'replace'
+    ? t('admin.riskControl.apiKeysModeReplaceHint')
+    : t('admin.riskControl.apiKeysModeAppendHint')
+))
+
+const auditApiKeysPlaceholder = computed(() => (
+  configForm.audit_api_keys_mode === 'replace'
+    ? t('admin.riskControl.auditApiKeysPlaceholderReplace')
+    : t('admin.riskControl.auditApiKeysPlaceholder')
 ))
 
 const hasModerationAuditInput = computed(() => {
@@ -1682,6 +1868,7 @@ const runtimeBadgeClass = computed(() => {
 function applyConfig(config: ContentModerationConfig) {
   configForm.enabled = config.enabled
   configForm.mode = config.mode
+  configForm.risk_control_provider = config.risk_control_provider || 'legacy_moderation'
   configForm.base_url = config.base_url || 'https://api.openai.com'
   configForm.model = config.model || 'omni-moderation-latest'
   configForm.api_keys_text = ''
@@ -1692,6 +1879,25 @@ function applyConfig(config: ContentModerationConfig) {
   configForm.api_key_statuses = Array.isArray(config.api_key_statuses) ? [...config.api_key_statuses] : []
   configForm.api_keys_mode = 'append'
   configForm.clear_api_key = false
+  configForm.audit_base_url = config.audit_base_url || 'https://api.openai.com'
+  configForm.audit_path = config.audit_path || '/v1/responses'
+  configForm.audit_model = config.audit_model || ''
+  configForm.audit_api_keys_text = ''
+  configForm.audit_api_key_configured = config.audit_api_key_configured
+  configForm.audit_api_key_count = config.audit_api_key_count || 0
+  configForm.audit_api_key_masks = Array.isArray(config.audit_api_key_masks) ? [...config.audit_api_key_masks] : []
+  configForm.audit_api_keys_mode = 'append'
+  configForm.clear_audit_api_key = false
+  configForm.audit_timeout_ms = config.audit_timeout_ms || 3000
+  configForm.audit_fail_closed = config.audit_fail_closed ?? false
+  configForm.audit_block_confidence_threshold = config.audit_block_confidence_threshold ?? 0.7
+  configForm.session_audit_interval_seconds = config.session_audit_interval_seconds ?? 300
+  configForm.session_blacklist_ttl_seconds = config.session_blacklist_ttl_seconds ?? 0
+  configForm.session_audit_enabled_protocols_text = Array.isArray(config.session_audit_enabled_protocols) && config.session_audit_enabled_protocols.length > 0
+    ? config.session_audit_enabled_protocols.join('\n')
+    : 'anthropic_messages'
+  configForm.audit_max_input_chars = config.audit_max_input_chars || 12000
+  configForm.audit_prompt_template = config.audit_prompt_template || ''
   pendingDeleteApiKeyHashes.value = []
   testedApiKeyStatuses.value = []
   apiKeyRowsExpanded.value = false
@@ -1772,6 +1978,7 @@ async function saveConfig() {
     const payload: UpdateContentModerationConfig = {
       enabled: configForm.enabled,
       mode: configForm.mode,
+      risk_control_provider: configForm.risk_control_provider,
       base_url: configForm.base_url,
       model: configForm.model,
       timeout_ms: Number(configForm.timeout_ms) || 3000,
@@ -1796,6 +2003,18 @@ async function saveConfig() {
       blocked_keywords: blockedKeywordList.value,
       keyword_blocking_mode: configForm.keyword_blocking_mode,
       model_filter: modelFilterPayload,
+      audit_base_url: configForm.audit_base_url,
+      audit_path: configForm.audit_path || '/v1/responses',
+      audit_model: configForm.audit_model,
+      audit_timeout_ms: Number(configForm.audit_timeout_ms) || 3000,
+      audit_fail_closed: configForm.audit_fail_closed,
+      audit_block_confidence_threshold: Number(configForm.audit_block_confidence_threshold) || 0,
+      session_audit_interval_seconds: Math.max(0, Number(configForm.session_audit_interval_seconds) || 0),
+      session_blacklist_ttl_seconds: Math.max(0, Number(configForm.session_blacklist_ttl_seconds) || 0),
+      session_audit_enabled_protocols: auditProtocolList.value,
+      audit_max_input_chars: Math.max(1, Number(configForm.audit_max_input_chars) || 12000),
+      audit_prompt_template: configForm.audit_prompt_template,
+      clear_audit_api_key: configForm.clear_audit_api_key,
     }
     const keys = parseApiKeys(configForm.api_keys_text)
     if (!payload.clear_api_key && configForm.api_keys_mode === 'replace' && keys.length === 0) {
@@ -1809,6 +2028,35 @@ async function saveConfig() {
     }
     if (!payload.clear_api_key && configForm.api_keys_mode !== 'replace' && pendingDeleteApiKeyHashes.value.length > 0) {
       payload.delete_api_key_hashes = [...pendingDeleteApiKeyHashes.value]
+    }
+    const auditKeys = parseApiKeys(configForm.audit_api_keys_text)
+    if (configForm.risk_control_provider === 'openai_responses_session_audit' && configForm.enabled && configForm.mode !== 'off') {
+      if (!configForm.audit_model.trim()) {
+        appStore.showError(t('admin.riskControl.auditModelRequired'))
+        return
+      }
+      const willHaveAuditKey = configForm.clear_audit_api_key
+        ? auditKeys.length > 0
+        : configForm.audit_api_keys_mode === 'replace'
+          ? auditKeys.length > 0
+          : effectiveStoredAuditApiKeyCount.value + auditKeys.length > 0
+      if (!willHaveAuditKey) {
+        appStore.showError(t('admin.riskControl.auditApiKeyRequired'))
+        return
+      }
+      if (auditProtocolList.value.length === 0) {
+        appStore.showError(t('admin.riskControl.auditProtocolsRequired'))
+        return
+      }
+    }
+    if (!payload.clear_audit_api_key && configForm.audit_api_keys_mode === 'replace' && auditKeys.length === 0) {
+      appStore.showError(t('admin.riskControl.apiKeysReplaceNoInput'))
+      return
+    }
+    if (auditKeys.length > 0) {
+      payload.audit_api_keys = auditKeys
+      payload.audit_api_keys_mode = configForm.audit_api_keys_mode
+      payload.clear_audit_api_key = false
     }
 
     const updated = await adminAPI.riskControl.updateConfig(payload)
@@ -1949,6 +2197,18 @@ function setAPIKeysMode(mode: APIKeysWriteMode) {
   if (mode === 'replace') {
     pendingDeleteApiKeyHashes.value = []
   }
+}
+
+function toggleClearAuditApiKey() {
+  configForm.clear_audit_api_key = !configForm.clear_audit_api_key
+  if (configForm.clear_audit_api_key) {
+    configForm.audit_api_keys_text = ''
+    configForm.audit_api_keys_mode = 'append'
+  }
+}
+
+function setAuditAPIKeysMode(mode: APIKeysWriteMode) {
+  configForm.audit_api_keys_mode = mode
 }
 
 function setModelFilterType(type: ContentModerationModelFilterType) {
@@ -2205,6 +2465,18 @@ function parseApiKeys(value: string): string[] {
     .split(/\r?\n/)
     .map((item) => item.trim())
     .filter((item, index, arr) => item && arr.indexOf(item) === index)
+}
+
+function parseTextList(value: string): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const item of value.split(/[\r\n,]+/)) {
+    const normalized = item.trim()
+    if (!normalized || seen.has(normalized)) continue
+    seen.add(normalized)
+    out.push(normalized)
+  }
+  return out
 }
 
 function normalizeKeywordBlockingMode(value: unknown): KeywordBlockingMode {
