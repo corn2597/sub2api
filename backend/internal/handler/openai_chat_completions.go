@@ -85,7 +85,10 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 	setOpsRequestContext(c, reqModel, reqStream)
 	setOpsEndpointContext(c, "", int16(service.RequestTypeFromLegacy(reqStream, false)))
 
-	if decision := h.checkContentModeration(c, reqLog, apiKey, subject, service.ContentModerationProtocolOpenAIChat, reqModel, body); decision != nil && decision.Blocked {
+	sessionHash := h.gatewayService.GenerateSessionHash(c, body)
+	sessionCtx := openAIModerationSessionContext(c, subject, apiKey)
+	moderationSessionHash, moderationSessionExplicit := openAIModerationSession(c, body, sessionHash, sessionCtx)
+	if decision := h.checkContentModerationWithSession(c, reqLog, apiKey, subject, service.ContentModerationProtocolOpenAIChat, reqModel, moderationSessionHash, moderationSessionExplicit, body); decision != nil && decision.Blocked {
 		h.errorResponse(c, contentModerationStatus(decision), contentModerationErrorCode(decision), decision.Message)
 		return
 	}
@@ -124,7 +127,6 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 		return
 	}
 
-	sessionHash := h.gatewayService.GenerateSessionHash(c, body)
 	promptCacheKey := h.gatewayService.ExtractSessionID(c, body)
 
 	maxAccountSwitches := h.maxAccountSwitches

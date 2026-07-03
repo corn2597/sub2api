@@ -97,6 +97,7 @@ const baseConfig = (): ContentModerationConfig => ({
   pre_hash_check_enabled: false,
   blocked_keywords: [],
   keyword_blocking_mode: 'keyword_and_api',
+  cyber_policy_exclude_from_ban_count: false,
   thresholds: {
     harassment: 0.98,
     sexual: 0.65,
@@ -174,6 +175,25 @@ const ModelWhitelistSelectorStub = defineComponent({
         onInput,
       })
   },
+})
+const SelectOptionsStub = defineComponent({
+  props: {
+    options: {
+      type: Array,
+      default: () => [],
+    },
+  },
+  template: `
+    <div class="select-options-stub">
+      <div
+        v-for="option in options"
+        :key="String(option.value)"
+        class="select-option"
+      >
+        {{ option.value }}|{{ option.label }}
+      </div>
+    </div>
+  `,
 })
 
 function findButtonByText(wrapper: VueWrapper, text: string): DOMWrapper<HTMLButtonElement> {
@@ -276,10 +296,10 @@ describe('admin RiskControlView', () => {
     expect(showError).not.toHaveBeenCalled()
   })
 
-  it('describes worker runtime as async audit and pre-block record processing', async () => {
+  it('shows worker runtime for async_block mode', async () => {
     getStatus.mockResolvedValue({
       ...runtimeStatus(),
-      mode: 'observe',
+      mode: 'async_block',
       processed: 12,
       queue_length: 2,
     })
@@ -305,6 +325,84 @@ describe('admin RiskControlView', () => {
     expect(wrapper.text()).toContain('admin.riskControl.records')
     expect(wrapper.text()).toContain('12')
     expect(wrapper.text()).toContain('2 / 32,768')
+  })
+
+  it('renders the async_block mode description in settings', async () => {
+    getConfig.mockResolvedValue({
+      ...baseConfig(),
+      mode: 'async_block',
+    })
+
+    const wrapper = mount(RiskControlView, {
+      global: {
+        stubs: {
+          AppLayout: AppLayoutStub,
+          BaseDialog: BaseDialogStub,
+          Icon: true,
+          Select: true,
+          Toggle: true,
+          Pagination: true,
+          ModelWhitelistSelector: ModelWhitelistSelectorStub,
+        },
+      },
+    })
+
+    await flushPromises()
+    await findButtonByText(wrapper, 'admin.riskControl.openSettings').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('admin.riskControl.modeAsyncBlockDesc')
+  })
+
+  it('shows the dedicated async_block result filter option', async () => {
+    const wrapper = mount(RiskControlView, {
+      global: {
+        stubs: {
+          AppLayout: AppLayoutStub,
+          BaseDialog: BaseDialogStub,
+          Icon: true,
+          Select: SelectOptionsStub,
+          Toggle: true,
+          Pagination: true,
+          ModelWhitelistSelector: ModelWhitelistSelectorStub,
+        },
+      },
+    })
+
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('async_block|admin.riskControl.result.asyncBlock')
+    expect(wrapper.text()).toContain('blocked|admin.riskControl.result.blocked')
+  })
+
+  it('explains keyword_only behavior in async_block mode', async () => {
+    getConfig.mockResolvedValue({
+      ...baseConfig(),
+      mode: 'async_block',
+      keyword_blocking_mode: 'keyword_only',
+    })
+
+    const wrapper = mount(RiskControlView, {
+      global: {
+        stubs: {
+          AppLayout: AppLayoutStub,
+          BaseDialog: BaseDialogStub,
+          Icon: true,
+          Select: true,
+          Toggle: true,
+          Pagination: true,
+          ModelWhitelistSelector: ModelWhitelistSelectorStub,
+        },
+      },
+    })
+
+    await flushPromises()
+    await findButtonByText(wrapper, 'admin.riskControl.openSettings').trigger('click')
+    await findButtonByText(wrapper, 'admin.riskControl.tabs.keywords').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('admin.riskControl.keywordModeKeywordOnlyAsyncBlockNotice')
+    expect(wrapper.text()).toContain('admin.riskControl.keywordModeKeywordOnlyAsyncBlockDesc')
   })
 
   it('shows pre-block synchronous moderation metrics separately from worker queue', async () => {

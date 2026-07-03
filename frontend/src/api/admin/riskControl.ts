@@ -1,6 +1,6 @@
 import { apiClient } from '../client'
 
-export type ModerationMode = 'off' | 'observe' | 'pre_block'
+export type ModerationMode = 'off' | 'observe' | 'pre_block' | 'async_block'
 export type KeywordBlockingMode = 'keyword_only' | 'keyword_and_api' | 'api_only'
 export type ContentModerationModelFilterType = 'all' | 'include' | 'exclude'
 

@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -77,11 +78,26 @@ func (r *contentModerationTestSettingRepo) Delete(ctx context.Context, key strin
 }
 
 type contentModerationTestRepo struct {
-	mu   sync.Mutex
-	logs []ContentModerationLog
+	mu               sync.Mutex
+	logs             []ContentModerationLog
+	createLogStarted chan struct{}
+	createLogBlock   <-chan struct{}
 }
 
 func (r *contentModerationTestRepo) CreateLog(ctx context.Context, log *ContentModerationLog) error {
+	if r.createLogStarted != nil {
+		select {
+		case r.createLogStarted <- struct{}{}:
+		default:
+		}
+	}
+	if r.createLogBlock != nil {
+		select {
+		case <-r.createLogBlock:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if log != nil {
@@ -99,7 +115,7 @@ func (r *contentModerationTestRepo) CountFlaggedByUserSince(ctx context.Context,
 	defer r.mu.Unlock()
 	count := 0
 	for _, log := range r.logs {
-		if log.UserID == nil || *log.UserID != userID || !log.Flagged || log.Action == ContentModerationActionHashBlock {
+		if log.UserID == nil || *log.UserID != userID || !log.Flagged || log.Action == ContentModerationActionHashBlock || log.Action == ContentModerationActionSessionBlock {
 			continue
 		}
 		if excludeCyberPolicy && log.Action == ContentModerationActionCyberPolicy {
@@ -157,6 +173,16 @@ type contentModerationTestHashCache struct {
 	deleted       []string
 	hasResult     bool
 	hasResultUsed bool
+}
+
+type contentModerationTestSessionStore struct {
+	mu          sync.Mutex
+	blocked     map[string]struct{}
+	allowWindow map[string]struct{}
+	inflight    map[string]struct{}
+	acquireErr  error
+	clearErr    error
+	acquireHits int
 }
 
 type contentModerationTestUserRepo struct {
@@ -383,6 +409,80 @@ func (c *contentModerationTestHashCache) snapshotDeleted() []string {
 	out := make([]string, len(c.deleted))
 	copy(out, c.deleted)
 	return out
+}
+
+func (s *contentModerationTestSessionStore) IsBlocked(ctx context.Context, scope string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.blocked[scope]
+	return ok, nil
+}
+
+func (s *contentModerationTestSessionStore) MarkBlocked(ctx context.Context, scope string, ttl time.Duration) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.blocked == nil {
+		s.blocked = map[string]struct{}{}
+	}
+	s.blocked[scope] = struct{}{}
+	return nil
+}
+
+func (s *contentModerationTestSessionStore) HasAllowWindow(ctx context.Context, scope string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.allowWindow[scope]
+	return ok, nil
+}
+
+func (s *contentModerationTestSessionStore) MarkAllowWindow(ctx context.Context, scope string, ttl time.Duration) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.allowWindow == nil {
+		s.allowWindow = map[string]struct{}{}
+	}
+	s.allowWindow[scope] = struct{}{}
+	return nil
+}
+
+func (s *contentModerationTestSessionStore) AcquireInflight(ctx context.Context, scope string, ttl time.Duration) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.acquireHits++
+	if s.acquireErr != nil {
+		return false, s.acquireErr
+	}
+	if s.inflight == nil {
+		s.inflight = map[string]struct{}{}
+	}
+	if _, ok := s.inflight[scope]; ok {
+		return false, nil
+	}
+	s.inflight[scope] = struct{}{}
+	return true, nil
+}
+
+func (s *contentModerationTestSessionStore) ClearInflight(ctx context.Context, scope string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.clearErr != nil {
+		return s.clearErr
+	}
+	delete(s.inflight, scope)
+	return nil
+}
+
+func (s *contentModerationTestSessionStore) clearAllowWindow(scope string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.allowWindow, scope)
+}
+
+func (s *contentModerationTestSessionStore) hasInflight(scope string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.inflight[scope]
+	return ok
 }
 
 func TestBuildContentModerationLog_RedactsInputExcerpt(t *testing.T) {
@@ -726,6 +826,25 @@ func TestContentModerationLoadConfig_LegacyConfigDefaultsModelFilterToAll(t *tes
 	require.True(t, cfg.includesModel("gpt-5.4"))
 }
 
+func TestContentModerationUpdateConfig_PersistsAsyncBlockMode(t *testing.T) {
+	settingRepo := &contentModerationTestSettingRepo{values: map[string]string{
+		SettingKeyRiskControlEnabled: "true",
+	}}
+	svc := NewContentModerationService(settingRepo, nil, nil, nil, nil, nil, nil)
+	mode := ContentModerationModeAsyncBlock
+
+	view, err := svc.UpdateConfig(context.Background(), UpdateContentModerationConfigInput{
+		Mode: &mode,
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, ContentModerationModeAsyncBlock, view.Mode)
+
+	var saved ContentModerationConfig
+	require.NoError(t, json.Unmarshal([]byte(settingRepo.values[SettingKeyContentModerationConfig]), &saved))
+	require.Equal(t, ContentModerationModeAsyncBlock, saved.Mode)
+}
+
 func TestContentModerationCheck_ModelFilterUsesRequestedModelNotBodyModel(t *testing.T) {
 	cfg := defaultContentModerationModelFilterTestConfig()
 	cfg.ModelFilter = ContentModerationModelFilter{Type: ContentModerationModelFilterInclude, Models: []string{"gpt-5.5"}}
@@ -899,7 +1018,7 @@ func TestExtractContentModerationInput_AnthropicKeepsEphemeralUserTextAndSkipsSy
 	require.Empty(t, input.Images)
 }
 
-func TestExtractContentModerationInput_OpenAIChatUsesLastUserMessage(t *testing.T) {
+func TestExtractContentModerationInput_OpenAIChatUsesAllUserMessages(t *testing.T) {
 	body := []byte(`{
 		"model":"gpt-5.5",
 		"messages":[
@@ -912,10 +1031,27 @@ func TestExtractContentModerationInput_OpenAIChatUsesLastUserMessage(t *testing.
 
 	input := ExtractContentModerationInput(ContentModerationProtocolOpenAIChat, body)
 
-	require.Equal(t, "latest user", input.Text)
+	require.Equal(t, "old user latest user", input.Text)
 	require.Equal(t, []string{"https://example.com/a.png"}, input.Images)
-	require.NotContains(t, input.Text, "old user")
 	require.NotContains(t, input.Text, "system prompt")
+}
+
+func TestContentModerationSessionScope_PrefersUserOverAPIKey(t *testing.T) {
+	groupID := int64(3011)
+	first := ContentModerationCheckInput{
+		UserID:     1001,
+		APIKeyID:   2001,
+		GroupID:    &groupID,
+		SessionKey: "session-1",
+	}
+	second := first
+	second.APIKeyID = 2002
+
+	require.Equal(t, contentModerationSessionScope(first), contentModerationSessionScope(second))
+
+	anonymous := first
+	anonymous.UserID = 0
+	require.Contains(t, contentModerationSessionScope(anonymous), "key:2001")
 }
 
 func TestExtractContentModerationInput_OpenAIImagesIncludesPromptAndImages(t *testing.T) {
@@ -965,7 +1101,7 @@ func TestBuildModerationTestInputRejectsMultipleImages(t *testing.T) {
 	require.Contains(t, err.Error(), "最多上传 1 张测试图片")
 }
 
-func TestExtractContentModerationInput_OpenAIResponsesCodexPayloadUsesLastUserMessage(t *testing.T) {
+func TestExtractContentModerationInput_OpenAIResponsesCodexPayloadUsesAllUserMessages(t *testing.T) {
 	body := []byte(`{
 		"model":"gpt-5.5",
 		"instructions":"instructions.....",
@@ -979,10 +1115,9 @@ func TestExtractContentModerationInput_OpenAIResponsesCodexPayloadUsesLastUserMe
 
 	input := ExtractContentModerationInput(ContentModerationProtocolOpenAIResponses, body)
 
-	require.Equal(t, "last user prompt", input.Text)
+	require.Equal(t, "first user prompt last user prompt", input.Text)
 	require.Empty(t, input.Images)
 	require.NotContains(t, input.Text, "developer permissions")
-	require.NotContains(t, input.Text, "first user prompt")
 }
 
 func TestContentModerationCheck_OpenAIResponsesRecordsNonHitForCodexPayload(t *testing.T) {
@@ -1044,11 +1179,11 @@ func TestContentModerationCheck_OpenAIResponsesRecordsNonHitForCodexPayload(t *t
 	require.False(t, logs[0].Flagged)
 	require.Equal(t, ContentModerationActionAllow, logs[0].Action)
 	require.Equal(t, "/responses", logs[0].Endpoint)
-	require.Equal(t, "last user prompt", logs[0].InputExcerpt)
-	require.Equal(t, "last user prompt", moderationRequest.Input)
+	require.Equal(t, "first user prompt last user prompt", logs[0].InputExcerpt)
+	require.Equal(t, "first user prompt last user prompt", moderationRequest.Input)
 }
 
-func TestContentModerationCheck_PreBlockBlocksCodexResponsesLatestUserInput(t *testing.T) {
+func TestContentModerationCheck_PreBlockBlocksCodexResponsesAllUserInput(t *testing.T) {
 	var moderationRequest moderationAPIRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/v1/moderations", r.URL.Path)
@@ -1112,8 +1247,971 @@ func TestContentModerationCheck_PreBlockBlocksCodexResponsesLatestUserInput(t *t
 	require.True(t, logs[0].Flagged)
 	require.Equal(t, ContentModerationActionBlock, logs[0].Action)
 	require.Equal(t, ContentModerationModePreBlock, logs[0].Mode)
-	require.Equal(t, "latest blocked prompt", logs[0].InputExcerpt)
-	require.Equal(t, "latest blocked prompt", moderationRequest.Input)
+	require.Equal(t, "environment context latest blocked prompt", logs[0].InputExcerpt)
+	require.Equal(t, "environment context latest blocked prompt", moderationRequest.Input)
+}
+
+func TestContentModerationCheck_OpenAISessionFirstRequestAlwaysAuditedThenSkipsWithinAllowWindow(t *testing.T) {
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		_ = json.NewEncoder(w).Encode(moderationAPIResponse{
+			Results: []moderationAPIResult{{
+				CategoryScores: map[string]float64{"sexual": 0.01},
+			}},
+		})
+	}))
+	defer server.Close()
+
+	cfg := defaultContentModerationConfig()
+	cfg.Enabled = true
+	cfg.Mode = ContentModerationModePreBlock
+	cfg.BaseURL = server.URL
+	cfg.APIKeys = []string{"sk-test"}
+	cfg.SampleRate = 0
+	rawCfg, err := json.Marshal(cfg)
+	require.NoError(t, err)
+
+	groupID := int64(3001)
+	input := ContentModerationCheckInput{
+		UserID:     1001,
+		APIKeyID:   2001,
+		GroupID:    &groupID,
+		Protocol:   ContentModerationProtocolOpenAIChat,
+		SessionKey: "session-1",
+		Body:       []byte(`{"messages":[{"role":"user","content":"first prompt"}]}`),
+	}
+	sessionStore := &contentModerationTestSessionStore{}
+	svc := NewContentModerationService(
+		&contentModerationTestSettingRepo{values: map[string]string{
+			SettingKeyRiskControlEnabled:      "true",
+			SettingKeyContentModerationConfig: string(rawCfg),
+		}},
+		&contentModerationTestRepo{},
+		&contentModerationTestHashCache{},
+		nil,
+		nil,
+		nil,
+		nil,
+	).SetSessionStore(sessionStore)
+
+	firstDecision, err := svc.Check(context.Background(), input)
+	require.NoError(t, err)
+	require.True(t, firstDecision.Allowed)
+	require.True(t, firstDecision.AuditAttempted)
+	require.True(t, firstDecision.AuditSucceeded)
+	require.Equal(t, 1, requestCount)
+
+	sessionScope := contentModerationSessionScope(input)
+	allowedWindow, err := sessionStore.HasAllowWindow(context.Background(), sessionScope)
+	require.NoError(t, err)
+	require.True(t, allowedWindow)
+
+	secondInput := input
+	secondInput.Body = []byte(`{"messages":[{"role":"user","content":"second prompt"}]}`)
+	secondDecision, err := svc.Check(context.Background(), secondInput)
+	require.NoError(t, err)
+	require.True(t, secondDecision.Allowed)
+	require.False(t, secondDecision.AuditAttempted)
+	require.False(t, secondDecision.Blocked)
+	require.Equal(t, 1, requestCount)
+
+	sessionStore.clearAllowWindow(sessionScope)
+	thirdInput := input
+	thirdInput.Body = []byte(`{"messages":[{"role":"user","content":"third prompt"}]}`)
+	thirdDecision, err := svc.Check(context.Background(), thirdInput)
+	require.NoError(t, err)
+	require.True(t, thirdDecision.Allowed)
+	require.True(t, thirdDecision.AuditAttempted)
+	require.True(t, thirdDecision.AuditSucceeded)
+	require.Equal(t, 2, requestCount)
+}
+
+func TestContentModerationCheck_OpenAISessionBlockPreventsLaterRequests(t *testing.T) {
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		_ = json.NewEncoder(w).Encode(moderationAPIResponse{
+			Results: []moderationAPIResult{{
+				CategoryScores: map[string]float64{"sexual": 0.9},
+			}},
+		})
+	}))
+	defer server.Close()
+
+	cfg := defaultContentModerationConfig()
+	cfg.Enabled = true
+	cfg.Mode = ContentModerationModePreBlock
+	cfg.BaseURL = server.URL
+	cfg.APIKeys = []string{"sk-test"}
+	cfg.BlockMessage = "命中风险"
+	rawCfg, err := json.Marshal(cfg)
+	require.NoError(t, err)
+
+	groupID := int64(3001)
+	input := ContentModerationCheckInput{
+		UserID:     1001,
+		APIKeyID:   2001,
+		GroupID:    &groupID,
+		Protocol:   ContentModerationProtocolOpenAIChat,
+		SessionKey: "session-blocked",
+		Body:       []byte(`{"messages":[{"role":"user","content":"blocked prompt"}]}`),
+	}
+	repo := &contentModerationTestRepo{}
+	sessionStore := &contentModerationTestSessionStore{}
+	svc := NewContentModerationService(
+		&contentModerationTestSettingRepo{values: map[string]string{
+			SettingKeyRiskControlEnabled:      "true",
+			SettingKeyContentModerationConfig: string(rawCfg),
+		}},
+		repo,
+		&contentModerationTestHashCache{},
+		nil,
+		nil,
+		nil,
+		nil,
+	).SetSessionStore(sessionStore)
+
+	firstDecision, err := svc.Check(context.Background(), input)
+	require.NoError(t, err)
+	require.True(t, firstDecision.Blocked)
+	require.Equal(t, ContentModerationActionBlock, firstDecision.Action)
+	require.True(t, firstDecision.AuditSucceeded)
+	require.Equal(t, 1, requestCount)
+
+	sessionScope := contentModerationSessionScope(input)
+	blocked, err := sessionStore.IsBlocked(context.Background(), sessionScope)
+	require.NoError(t, err)
+	require.True(t, blocked)
+
+	secondInput := input
+	secondInput.Body = []byte(`{"messages":[{"role":"user","content":"clean prompt"}]}`)
+	secondDecision, err := svc.Check(context.Background(), secondInput)
+	require.NoError(t, err)
+	require.True(t, secondDecision.Blocked)
+	require.Equal(t, ContentModerationActionSessionBlock, secondDecision.Action)
+	require.Equal(t, "命中风险", secondDecision.Message)
+	require.Equal(t, 1, requestCount)
+	logs := requireContentModerationLogCount(t, repo, 2)
+	require.Equal(t, ContentModerationActionBlock, logs[0].Action)
+	require.Equal(t, ContentModerationActionSessionBlock, logs[1].Action)
+}
+
+func TestContentModerationCheck_OpenAIKeywordBlockBlackholesSession(t *testing.T) {
+	cfg := defaultContentModerationConfig()
+	cfg.Enabled = true
+	cfg.Mode = ContentModerationModePreBlock
+	cfg.KeywordBlockingMode = ContentModerationKeywordModeKeywordOnly
+	cfg.BlockedKeywords = []string{"blocked"}
+	cfg.BlockMessage = "命中风险"
+	rawCfg, err := json.Marshal(cfg)
+	require.NoError(t, err)
+
+	groupID := int64(3001)
+	input := ContentModerationCheckInput{
+		UserID:     1001,
+		APIKeyID:   2001,
+		GroupID:    &groupID,
+		Protocol:   ContentModerationProtocolOpenAIChat,
+		SessionKey: "session-keyword",
+		Body:       []byte(`{"messages":[{"role":"user","content":"blocked prompt"}]}`),
+	}
+	repo := &contentModerationTestRepo{}
+	sessionStore := &contentModerationTestSessionStore{}
+	svc := NewContentModerationService(
+		&contentModerationTestSettingRepo{values: map[string]string{
+			SettingKeyRiskControlEnabled:      "true",
+			SettingKeyContentModerationConfig: string(rawCfg),
+		}},
+		repo,
+		&contentModerationTestHashCache{},
+		nil,
+		nil,
+		nil,
+		nil,
+	).SetSessionStore(sessionStore)
+
+	firstDecision, err := svc.Check(context.Background(), input)
+	require.NoError(t, err)
+	require.True(t, firstDecision.Blocked)
+	require.Equal(t, ContentModerationActionKeywordBlock, firstDecision.Action)
+
+	secondInput := input
+	secondInput.Body = []byte(`{"messages":[{"role":"user","content":"clean prompt"}]}`)
+	secondDecision, err := svc.Check(context.Background(), secondInput)
+	require.NoError(t, err)
+	require.True(t, secondDecision.Blocked)
+	require.Equal(t, ContentModerationActionSessionBlock, secondDecision.Action)
+	logs := requireContentModerationLogCount(t, repo, 2)
+	require.Equal(t, ContentModerationActionKeywordBlock, logs[0].Action)
+	require.Equal(t, ContentModerationActionSessionBlock, logs[1].Action)
+}
+
+func TestContentModerationCheck_OpenAIHashBlockBlackholesSession(t *testing.T) {
+	cfg := defaultContentModerationConfig()
+	cfg.Enabled = true
+	cfg.Mode = ContentModerationModePreBlock
+	cfg.PreHashCheckEnabled = true
+	cfg.BlockMessage = "命中风险"
+	rawCfg, err := json.Marshal(cfg)
+	require.NoError(t, err)
+
+	hashCache := &contentModerationTestHashCache{hashes: map[string]struct{}{}}
+	blockedBody := []byte(`{"messages":[{"role":"user","content":"blocked prompt"}]}`)
+	blockedContent := ExtractContentModerationInput(ContentModerationProtocolOpenAIChat, blockedBody)
+	blockedContent.Normalize()
+	hashCache.hashes[blockedContent.Hash()] = struct{}{}
+
+	groupID := int64(3001)
+	input := ContentModerationCheckInput{
+		UserID:     1001,
+		APIKeyID:   2001,
+		GroupID:    &groupID,
+		Protocol:   ContentModerationProtocolOpenAIChat,
+		SessionKey: "session-hash",
+		Body:       blockedBody,
+	}
+	repo := &contentModerationTestRepo{}
+	sessionStore := &contentModerationTestSessionStore{}
+	svc := NewContentModerationService(
+		&contentModerationTestSettingRepo{values: map[string]string{
+			SettingKeyRiskControlEnabled:      "true",
+			SettingKeyContentModerationConfig: string(rawCfg),
+		}},
+		repo,
+		hashCache,
+		nil,
+		nil,
+		nil,
+		nil,
+	).SetSessionStore(sessionStore)
+
+	firstDecision, err := svc.Check(context.Background(), input)
+	require.NoError(t, err)
+	require.True(t, firstDecision.Blocked)
+	require.Equal(t, ContentModerationActionHashBlock, firstDecision.Action)
+
+	secondInput := input
+	secondInput.Body = []byte(`{"messages":[{"role":"user","content":"clean prompt"}]}`)
+	secondDecision, err := svc.Check(context.Background(), secondInput)
+	require.NoError(t, err)
+	require.True(t, secondDecision.Blocked)
+	require.Equal(t, ContentModerationActionSessionBlock, secondDecision.Action)
+	logs := requireContentModerationLogCount(t, repo, 2)
+	require.Equal(t, ContentModerationActionHashBlock, logs[0].Action)
+	require.Equal(t, ContentModerationActionSessionBlock, logs[1].Action)
+}
+
+func TestContentModerationCheck_AsyncBlockExplicitSessionAllowsThenSkipsWithinAllowWindow(t *testing.T) {
+	var requestCount atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount.Add(1)
+		_ = json.NewEncoder(w).Encode(moderationAPIResponse{
+			Results: []moderationAPIResult{{
+				CategoryScores: map[string]float64{"sexual": 0.01},
+			}},
+		})
+	}))
+	defer server.Close()
+
+	cfg := defaultContentModerationConfig()
+	cfg.Enabled = true
+	cfg.Mode = ContentModerationModeAsyncBlock
+	cfg.BaseURL = server.URL
+	cfg.APIKeys = []string{"sk-test"}
+	cfg.SampleRate = 0
+	cfg.RecordNonHits = true
+	rawCfg, err := json.Marshal(cfg)
+	require.NoError(t, err)
+
+	groupID := int64(3001)
+	input := ContentModerationCheckInput{
+		UserID:          1001,
+		APIKeyID:        2001,
+		GroupID:         &groupID,
+		Protocol:        ContentModerationProtocolOpenAIChat,
+		SessionKey:      "async-allow-window",
+		SessionExplicit: true,
+		Body:            []byte(`{"messages":[{"role":"user","content":"first clean prompt"}]}`),
+	}
+	repo := &contentModerationTestRepo{}
+	sessionStore := &contentModerationTestSessionStore{}
+	svc := NewContentModerationService(
+		&contentModerationTestSettingRepo{values: map[string]string{
+			SettingKeyRiskControlEnabled:      "true",
+			SettingKeyContentModerationConfig: string(rawCfg),
+		}},
+		repo,
+		&contentModerationTestHashCache{},
+		nil,
+		nil,
+		nil,
+		nil,
+	).SetSessionStore(sessionStore)
+
+	firstDecision, err := svc.Check(context.Background(), input)
+	require.NoError(t, err)
+	require.True(t, firstDecision.Allowed)
+	require.False(t, firstDecision.Blocked)
+	require.False(t, firstDecision.AuditAttempted)
+
+	require.Eventually(t, func() bool { return requestCount.Load() == 1 }, time.Second, 10*time.Millisecond)
+	sessionScope := contentModerationSessionScope(input)
+	require.Eventually(t, func() bool {
+		allowedWindow, err := sessionStore.HasAllowWindow(context.Background(), sessionScope)
+		return err == nil && allowedWindow
+	}, time.Second, 10*time.Millisecond)
+	logs := requireContentModerationLogCount(t, repo, 1)
+	require.Equal(t, ContentModerationModeAsyncBlock, logs[0].Mode)
+	require.Equal(t, ContentModerationActionAllow, logs[0].Action)
+
+	secondInput := input
+	secondInput.Body = []byte(`{"messages":[{"role":"user","content":"second clean prompt"}]}`)
+	secondDecision, err := svc.Check(context.Background(), secondInput)
+	require.NoError(t, err)
+	require.True(t, secondDecision.Allowed)
+	require.False(t, secondDecision.Blocked)
+	require.False(t, secondDecision.AuditAttempted)
+	time.Sleep(150 * time.Millisecond)
+	require.Equal(t, int64(1), requestCount.Load())
+
+	sessionStore.clearAllowWindow(sessionScope)
+	thirdInput := input
+	thirdInput.Body = []byte(`{"messages":[{"role":"user","content":"third clean prompt"}]}`)
+	thirdDecision, err := svc.Check(context.Background(), thirdInput)
+	require.NoError(t, err)
+	require.True(t, thirdDecision.Allowed)
+	require.Eventually(t, func() bool { return requestCount.Load() == 2 }, time.Second, 10*time.Millisecond)
+}
+
+func TestContentModerationCheck_AsyncBlockKeywordOnlyStillAuditsExplicitSessionMisses(t *testing.T) {
+	var requestCount atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount.Add(1)
+		_ = json.NewEncoder(w).Encode(moderationAPIResponse{
+			Results: []moderationAPIResult{{
+				CategoryScores: map[string]float64{"sexual": 0.01},
+			}},
+		})
+	}))
+	defer server.Close()
+
+	cfg := defaultContentModerationConfig()
+	cfg.Enabled = true
+	cfg.Mode = ContentModerationModeAsyncBlock
+	cfg.KeywordBlockingMode = ContentModerationKeywordModeKeywordOnly
+	cfg.BlockedKeywords = []string{"blocked"}
+	cfg.BaseURL = server.URL
+	cfg.APIKeys = []string{"sk-test"}
+	cfg.SampleRate = 0
+	cfg.RecordNonHits = true
+	rawCfg, err := json.Marshal(cfg)
+	require.NoError(t, err)
+
+	groupID := int64(3001)
+	input := ContentModerationCheckInput{
+		UserID:          1001,
+		APIKeyID:        2001,
+		GroupID:         &groupID,
+		Protocol:        ContentModerationProtocolOpenAIChat,
+		SessionKey:      "async-keyword-only-explicit",
+		SessionExplicit: true,
+		Body:            []byte(`{"messages":[{"role":"user","content":"first clean prompt"}]}`),
+	}
+	repo := &contentModerationTestRepo{}
+	sessionStore := &contentModerationTestSessionStore{}
+	svc := NewContentModerationService(
+		&contentModerationTestSettingRepo{values: map[string]string{
+			SettingKeyRiskControlEnabled:      "true",
+			SettingKeyContentModerationConfig: string(rawCfg),
+		}},
+		repo,
+		&contentModerationTestHashCache{},
+		nil,
+		nil,
+		nil,
+		nil,
+	).SetSessionStore(sessionStore)
+
+	firstDecision, err := svc.Check(context.Background(), input)
+	require.NoError(t, err)
+	require.True(t, firstDecision.Allowed)
+	require.False(t, firstDecision.Blocked)
+	require.False(t, firstDecision.AuditAttempted)
+
+	require.Eventually(t, func() bool { return requestCount.Load() == 1 }, time.Second, 10*time.Millisecond)
+	sessionScope := contentModerationSessionScope(input)
+	require.Eventually(t, func() bool {
+		allowedWindow, err := sessionStore.HasAllowWindow(context.Background(), sessionScope)
+		return err == nil && allowedWindow
+	}, time.Second, 10*time.Millisecond)
+	logs := requireContentModerationLogCount(t, repo, 1)
+	require.Equal(t, ContentModerationActionAllow, logs[0].Action)
+
+	secondInput := input
+	secondInput.Body = []byte(`{"messages":[{"role":"user","content":"second clean prompt"}]}`)
+	secondDecision, err := svc.Check(context.Background(), secondInput)
+	require.NoError(t, err)
+	require.True(t, secondDecision.Allowed)
+	require.False(t, secondDecision.AuditAttempted)
+	time.Sleep(150 * time.Millisecond)
+	require.Equal(t, int64(1), requestCount.Load())
+}
+
+func TestContentModerationCheck_AsyncBlockHitBlackholesExplicitSessionAcrossKeys(t *testing.T) {
+	var requestCount atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount.Add(1)
+		_ = json.NewEncoder(w).Encode(moderationAPIResponse{
+			Results: []moderationAPIResult{{
+				CategoryScores: map[string]float64{"sexual": 0.9},
+			}},
+		})
+	}))
+	defer server.Close()
+
+	cfg := defaultContentModerationConfig()
+	cfg.Enabled = true
+	cfg.Mode = ContentModerationModeAsyncBlock
+	cfg.BaseURL = server.URL
+	cfg.APIKeys = []string{"sk-test"}
+	cfg.BlockMessage = "命中风险"
+	cfg.RecordNonHits = true
+	rawCfg, err := json.Marshal(cfg)
+	require.NoError(t, err)
+
+	groupID := int64(3001)
+	input := ContentModerationCheckInput{
+		UserID:          1001,
+		APIKeyID:        2001,
+		GroupID:         &groupID,
+		Protocol:        ContentModerationProtocolOpenAIChat,
+		SessionKey:      "async-blocked",
+		SessionExplicit: true,
+		Body:            []byte(`{"messages":[{"role":"user","content":"blocked prompt"}]}`),
+	}
+	repo := &contentModerationTestRepo{}
+	sessionStore := &contentModerationTestSessionStore{}
+	svc := NewContentModerationService(
+		&contentModerationTestSettingRepo{values: map[string]string{
+			SettingKeyRiskControlEnabled:      "true",
+			SettingKeyContentModerationConfig: string(rawCfg),
+		}},
+		repo,
+		&contentModerationTestHashCache{},
+		nil,
+		nil,
+		nil,
+		nil,
+	).SetSessionStore(sessionStore)
+
+	firstDecision, err := svc.Check(context.Background(), input)
+	require.NoError(t, err)
+	require.True(t, firstDecision.Allowed)
+	require.False(t, firstDecision.Blocked)
+	require.False(t, firstDecision.AuditAttempted)
+	require.Eventually(t, func() bool { return requestCount.Load() == 1 }, time.Second, 10*time.Millisecond)
+
+	sessionScope := contentModerationSessionScope(input)
+	require.Eventually(t, func() bool {
+		blocked, err := sessionStore.IsBlocked(context.Background(), sessionScope)
+		return err == nil && blocked
+	}, time.Second, 10*time.Millisecond)
+
+	secondInput := input
+	secondInput.Body = []byte(`{"messages":[{"role":"user","content":"clean prompt"}]}`)
+	secondDecision, err := svc.Check(context.Background(), secondInput)
+	require.NoError(t, err)
+	require.True(t, secondDecision.Blocked)
+	require.Equal(t, ContentModerationActionSessionBlock, secondDecision.Action)
+	require.Equal(t, "命中风险", secondDecision.Message)
+
+	thirdInput := secondInput
+	thirdInput.APIKeyID = 2002
+	thirdDecision, err := svc.Check(context.Background(), thirdInput)
+	require.NoError(t, err)
+	require.True(t, thirdDecision.Blocked)
+	require.Equal(t, ContentModerationActionSessionBlock, thirdDecision.Action)
+
+	time.Sleep(150 * time.Millisecond)
+	require.Equal(t, int64(1), requestCount.Load())
+	logs := requireContentModerationLogCount(t, repo, 3)
+	require.Equal(t, ContentModerationActionAsyncBlock, logs[0].Action)
+	require.Equal(t, ContentModerationActionSessionBlock, logs[1].Action)
+	require.Equal(t, ContentModerationActionSessionBlock, logs[2].Action)
+}
+
+func TestContentModerationCheck_AsyncBlockMarksSessionBeforeSlowPersistence(t *testing.T) {
+	var requestCount atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount.Add(1)
+		_ = json.NewEncoder(w).Encode(moderationAPIResponse{
+			Results: []moderationAPIResult{{
+				CategoryScores: map[string]float64{"sexual": 0.9},
+			}},
+		})
+	}))
+	defer server.Close()
+
+	cfg := defaultContentModerationConfig()
+	cfg.Enabled = true
+	cfg.Mode = ContentModerationModeAsyncBlock
+	cfg.BaseURL = server.URL
+	cfg.APIKeys = []string{"sk-test"}
+	cfg.BlockMessage = "命中风险"
+	cfg.RecordNonHits = true
+	rawCfg, err := json.Marshal(cfg)
+	require.NoError(t, err)
+
+	groupID := int64(3001)
+	createLogBlock := make(chan struct{})
+	repo := &contentModerationTestRepo{
+		createLogStarted: make(chan struct{}, 8),
+		createLogBlock:   createLogBlock,
+	}
+	sessionStore := &contentModerationTestSessionStore{}
+	svc := NewContentModerationService(
+		&contentModerationTestSettingRepo{values: map[string]string{
+			SettingKeyRiskControlEnabled:      "true",
+			SettingKeyContentModerationConfig: string(rawCfg),
+		}},
+		repo,
+		&contentModerationTestHashCache{},
+		nil,
+		nil,
+		nil,
+		nil,
+	).SetSessionStore(sessionStore)
+
+	input := ContentModerationCheckInput{
+		UserID:          1001,
+		APIKeyID:        2001,
+		GroupID:         &groupID,
+		Protocol:        ContentModerationProtocolOpenAIChat,
+		SessionKey:      "async-blocked-slow-log",
+		SessionExplicit: true,
+		Body:            []byte(`{"messages":[{"role":"user","content":"blocked prompt"}]}`),
+	}
+
+	firstDecision, err := svc.Check(context.Background(), input)
+	require.NoError(t, err)
+	require.True(t, firstDecision.Allowed)
+	require.False(t, firstDecision.Blocked)
+
+	select {
+	case <-repo.createLogStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for async persistence to start")
+	}
+
+	sessionScope := contentModerationSessionScope(input)
+	blocked, err := sessionStore.IsBlocked(context.Background(), sessionScope)
+	require.NoError(t, err)
+	require.True(t, blocked)
+
+	secondInput := input
+	secondInput.Body = []byte(`{"messages":[{"role":"user","content":"clean prompt"}]}`)
+	secondDecision, err := svc.Check(context.Background(), secondInput)
+	require.NoError(t, err)
+	require.True(t, secondDecision.Blocked)
+	require.Equal(t, ContentModerationActionSessionBlock, secondDecision.Action)
+	time.Sleep(150 * time.Millisecond)
+	require.Equal(t, int64(1), requestCount.Load())
+
+	close(createLogBlock)
+	logs := requireContentModerationLogCount(t, repo, 2)
+	require.ElementsMatch(t, []string{ContentModerationActionAsyncBlock, ContentModerationActionSessionBlock}, []string{logs[0].Action, logs[1].Action})
+}
+
+func TestContentModerationCheck_AsyncBlockWithoutExplicitSessionFallsBackWithoutSessionBan(t *testing.T) {
+	var requestCount atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount.Add(1)
+		_ = json.NewEncoder(w).Encode(moderationAPIResponse{
+			Results: []moderationAPIResult{{
+				CategoryScores: map[string]float64{"sexual": 0.9},
+			}},
+		})
+	}))
+	defer server.Close()
+
+	cfg := defaultContentModerationConfig()
+	cfg.Enabled = true
+	cfg.Mode = ContentModerationModeAsyncBlock
+	cfg.BaseURL = server.URL
+	cfg.APIKeys = []string{"sk-test"}
+	cfg.SampleRate = 100
+	cfg.RecordNonHits = true
+	rawCfg, err := json.Marshal(cfg)
+	require.NoError(t, err)
+
+	groupID := int64(3001)
+	input := ContentModerationCheckInput{
+		UserID:          1001,
+		APIKeyID:        2001,
+		GroupID:         &groupID,
+		Protocol:        ContentModerationProtocolOpenAIChat,
+		SessionKey:      "fallback-session-hash",
+		SessionExplicit: false,
+		Body:            []byte(`{"messages":[{"role":"user","content":"first risky prompt"}]}`),
+	}
+	repo := &contentModerationTestRepo{}
+	sessionStore := &contentModerationTestSessionStore{}
+	svc := NewContentModerationService(
+		&contentModerationTestSettingRepo{values: map[string]string{
+			SettingKeyRiskControlEnabled:      "true",
+			SettingKeyContentModerationConfig: string(rawCfg),
+		}},
+		repo,
+		&contentModerationTestHashCache{},
+		nil,
+		nil,
+		nil,
+		nil,
+	).SetSessionStore(sessionStore)
+
+	firstDecision, err := svc.Check(context.Background(), input)
+	require.NoError(t, err)
+	require.True(t, firstDecision.Allowed)
+	require.False(t, firstDecision.Blocked)
+	require.Eventually(t, func() bool { return requestCount.Load() == 1 }, time.Second, 10*time.Millisecond)
+
+	sessionScope := contentModerationSessionScope(input)
+	blocked, err := sessionStore.IsBlocked(context.Background(), sessionScope)
+	require.NoError(t, err)
+	require.False(t, blocked)
+	allowedWindow, err := sessionStore.HasAllowWindow(context.Background(), sessionScope)
+	require.NoError(t, err)
+	require.False(t, allowedWindow)
+
+	secondInput := input
+	secondInput.Body = []byte(`{"messages":[{"role":"user","content":"second risky prompt"}]}`)
+	secondDecision, err := svc.Check(context.Background(), secondInput)
+	require.NoError(t, err)
+	require.True(t, secondDecision.Allowed)
+	require.Eventually(t, func() bool { return requestCount.Load() == 2 }, time.Second, 10*time.Millisecond)
+	logs := requireContentModerationLogCount(t, repo, 2)
+	require.Equal(t, ContentModerationModeAsyncBlock, logs[0].Mode)
+	require.Equal(t, ContentModerationActionAllow, logs[0].Action)
+	require.Equal(t, ContentModerationActionAllow, logs[1].Action)
+}
+
+func TestContentModerationCheck_AsyncBlockKeywordOnlyWithoutExplicitSessionSkipsAPIAudit(t *testing.T) {
+	var requestCount atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount.Add(1)
+		_ = json.NewEncoder(w).Encode(moderationAPIResponse{
+			Results: []moderationAPIResult{{
+				CategoryScores: map[string]float64{"sexual": 0.9},
+			}},
+		})
+	}))
+	defer server.Close()
+
+	cfg := defaultContentModerationConfig()
+	cfg.Enabled = true
+	cfg.Mode = ContentModerationModeAsyncBlock
+	cfg.KeywordBlockingMode = ContentModerationKeywordModeKeywordOnly
+	cfg.BlockedKeywords = []string{"blocked"}
+	cfg.BaseURL = server.URL
+	cfg.APIKeys = []string{"sk-test"}
+	cfg.SampleRate = 100
+	cfg.RecordNonHits = true
+	rawCfg, err := json.Marshal(cfg)
+	require.NoError(t, err)
+
+	groupID := int64(3001)
+	input := ContentModerationCheckInput{
+		UserID:          1001,
+		APIKeyID:        2001,
+		GroupID:         &groupID,
+		Protocol:        ContentModerationProtocolOpenAIChat,
+		SessionKey:      "async-keyword-only-fallback",
+		SessionExplicit: false,
+		Body:            []byte(`{"messages":[{"role":"user","content":"first clean prompt"}]}`),
+	}
+	repo := &contentModerationTestRepo{}
+	sessionStore := &contentModerationTestSessionStore{}
+	svc := NewContentModerationService(
+		&contentModerationTestSettingRepo{values: map[string]string{
+			SettingKeyRiskControlEnabled:      "true",
+			SettingKeyContentModerationConfig: string(rawCfg),
+		}},
+		repo,
+		&contentModerationTestHashCache{},
+		nil,
+		nil,
+		nil,
+		nil,
+	).SetSessionStore(sessionStore)
+
+	decision, err := svc.Check(context.Background(), input)
+	require.NoError(t, err)
+	require.True(t, decision.Allowed)
+	require.False(t, decision.AuditAttempted)
+
+	time.Sleep(150 * time.Millisecond)
+	require.Equal(t, int64(0), requestCount.Load())
+	require.Empty(t, repo.snapshotLogs())
+	sessionScope := contentModerationSessionScope(input)
+	blocked, err := sessionStore.IsBlocked(context.Background(), sessionScope)
+	require.NoError(t, err)
+	require.False(t, blocked)
+	allowedWindow, err := sessionStore.HasAllowWindow(context.Background(), sessionScope)
+	require.NoError(t, err)
+	require.False(t, allowedWindow)
+}
+
+func TestContentModerationCheck_AsyncBlockDedupesInflightSessionAudit(t *testing.T) {
+	var requestCount atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount.Add(1)
+		time.Sleep(120 * time.Millisecond)
+		_ = json.NewEncoder(w).Encode(moderationAPIResponse{
+			Results: []moderationAPIResult{{
+				CategoryScores: map[string]float64{"sexual": 0.01},
+			}},
+		})
+	}))
+	defer server.Close()
+
+	cfg := defaultContentModerationConfig()
+	cfg.Enabled = true
+	cfg.Mode = ContentModerationModeAsyncBlock
+	cfg.BaseURL = server.URL
+	cfg.APIKeys = []string{"sk-test"}
+	cfg.SampleRate = 0
+	cfg.RecordNonHits = true
+	rawCfg, err := json.Marshal(cfg)
+	require.NoError(t, err)
+
+	groupID := int64(3001)
+	sessionStore := &contentModerationTestSessionStore{}
+	repo := &contentModerationTestRepo{}
+	svc := NewContentModerationService(
+		&contentModerationTestSettingRepo{values: map[string]string{
+			SettingKeyRiskControlEnabled:      "true",
+			SettingKeyContentModerationConfig: string(rawCfg),
+		}},
+		repo,
+		&contentModerationTestHashCache{},
+		nil,
+		nil,
+		nil,
+		nil,
+	).SetSessionStore(sessionStore)
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, 6)
+	for idx := 0; idx < 6; idx++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			decision, err := svc.Check(context.Background(), ContentModerationCheckInput{
+				UserID:          1001,
+				APIKeyID:        2001,
+				GroupID:         &groupID,
+				Protocol:        ContentModerationProtocolOpenAIChat,
+				SessionKey:      "async-inflight",
+				SessionExplicit: true,
+				Body:            []byte(fmt.Sprintf(`{"messages":[{"role":"user","content":"prompt %d"}]}`, i)),
+			})
+			if err != nil {
+				errCh <- err
+				return
+			}
+			if decision == nil || !decision.Allowed || decision.Blocked {
+				errCh <- fmt.Errorf("unexpected decision: %+v", decision)
+			}
+		}(idx)
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		require.NoError(t, err)
+	}
+
+	require.Eventually(t, func() bool { return requestCount.Load() == 1 }, 2*time.Second, 10*time.Millisecond)
+	requireContentModerationLogCount(t, repo, 1)
+	sessionScope := contentModerationSessionScope(ContentModerationCheckInput{
+		UserID:     1001,
+		APIKeyID:   2001,
+		GroupID:    &groupID,
+		SessionKey: "async-inflight",
+	})
+	require.Eventually(t, func() bool {
+		allowedWindow, err := sessionStore.HasAllowWindow(context.Background(), sessionScope)
+		return err == nil && allowedWindow
+	}, 2*time.Second, 10*time.Millisecond)
+	require.False(t, sessionStore.hasInflight(sessionScope))
+}
+
+func TestContentModerationCheck_AsyncBlockKeywordBlockStillBlackholesExplicitSession(t *testing.T) {
+	cfg := defaultContentModerationConfig()
+	cfg.Enabled = true
+	cfg.Mode = ContentModerationModeAsyncBlock
+	cfg.KeywordBlockingMode = ContentModerationKeywordModeKeywordOnly
+	cfg.BlockedKeywords = []string{"blocked"}
+	cfg.BlockMessage = "命中风险"
+	rawCfg, err := json.Marshal(cfg)
+	require.NoError(t, err)
+
+	groupID := int64(3001)
+	input := ContentModerationCheckInput{
+		UserID:          1001,
+		APIKeyID:        2001,
+		GroupID:         &groupID,
+		Protocol:        ContentModerationProtocolOpenAIChat,
+		SessionKey:      "async-keyword",
+		SessionExplicit: true,
+		Body:            []byte(`{"messages":[{"role":"user","content":"blocked prompt"}]}`),
+	}
+	repo := &contentModerationTestRepo{}
+	sessionStore := &contentModerationTestSessionStore{}
+	svc := NewContentModerationService(
+		&contentModerationTestSettingRepo{values: map[string]string{
+			SettingKeyRiskControlEnabled:      "true",
+			SettingKeyContentModerationConfig: string(rawCfg),
+		}},
+		repo,
+		&contentModerationTestHashCache{},
+		nil,
+		nil,
+		nil,
+		nil,
+	).SetSessionStore(sessionStore)
+
+	firstDecision, err := svc.Check(context.Background(), input)
+	require.NoError(t, err)
+	require.True(t, firstDecision.Blocked)
+	require.Equal(t, ContentModerationActionKeywordBlock, firstDecision.Action)
+
+	secondInput := input
+	secondInput.Body = []byte(`{"messages":[{"role":"user","content":"clean prompt"}]}`)
+	secondDecision, err := svc.Check(context.Background(), secondInput)
+	require.NoError(t, err)
+	require.True(t, secondDecision.Blocked)
+	require.Equal(t, ContentModerationActionSessionBlock, secondDecision.Action)
+}
+
+func TestContentModerationCheck_AsyncBlockPreHashBlockStillBlackholesExplicitSession(t *testing.T) {
+	cfg := defaultContentModerationConfig()
+	cfg.Enabled = true
+	cfg.Mode = ContentModerationModeAsyncBlock
+	cfg.PreHashCheckEnabled = true
+	cfg.BlockMessage = "命中风险"
+	rawCfg, err := json.Marshal(cfg)
+	require.NoError(t, err)
+
+	hashCache := &contentModerationTestHashCache{hashes: map[string]struct{}{}}
+	blockedBody := []byte(`{"messages":[{"role":"user","content":"blocked prompt"}]}`)
+	blockedContent := ExtractContentModerationInput(ContentModerationProtocolOpenAIChat, blockedBody)
+	blockedContent.Normalize()
+	hashCache.hashes[blockedContent.Hash()] = struct{}{}
+
+	groupID := int64(3001)
+	input := ContentModerationCheckInput{
+		UserID:          1001,
+		APIKeyID:        2001,
+		GroupID:         &groupID,
+		Protocol:        ContentModerationProtocolOpenAIChat,
+		SessionKey:      "async-hash",
+		SessionExplicit: true,
+		Body:            blockedBody,
+	}
+	sessionStore := &contentModerationTestSessionStore{}
+	svc := NewContentModerationService(
+		&contentModerationTestSettingRepo{values: map[string]string{
+			SettingKeyRiskControlEnabled:      "true",
+			SettingKeyContentModerationConfig: string(rawCfg),
+		}},
+		&contentModerationTestRepo{},
+		hashCache,
+		nil,
+		nil,
+		nil,
+		nil,
+	).SetSessionStore(sessionStore)
+
+	firstDecision, err := svc.Check(context.Background(), input)
+	require.NoError(t, err)
+	require.True(t, firstDecision.Blocked)
+	require.Equal(t, ContentModerationActionHashBlock, firstDecision.Action)
+
+	secondInput := input
+	secondInput.Body = []byte(`{"messages":[{"role":"user","content":"clean prompt"}]}`)
+	secondDecision, err := svc.Check(context.Background(), secondInput)
+	require.NoError(t, err)
+	require.True(t, secondDecision.Blocked)
+	require.Equal(t, ContentModerationActionSessionBlock, secondDecision.Action)
+}
+
+func TestContentModerationCheck_AsyncBlockFailsOpenOnAuditAndStoreErrors(t *testing.T) {
+	var requestCount atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":{"message":"upstream failed"}}`))
+	}))
+	defer server.Close()
+
+	cfg := defaultContentModerationConfig()
+	cfg.Enabled = true
+	cfg.Mode = ContentModerationModeAsyncBlock
+	cfg.BaseURL = server.URL
+	cfg.APIKeys = []string{"sk-test"}
+	cfg.SampleRate = 0
+	cfg.RecordNonHits = true
+	rawCfg, err := json.Marshal(cfg)
+	require.NoError(t, err)
+
+	groupID := int64(3001)
+	input := ContentModerationCheckInput{
+		UserID:          1001,
+		APIKeyID:        2001,
+		GroupID:         &groupID,
+		Protocol:        ContentModerationProtocolOpenAIChat,
+		SessionKey:      "async-fail-open",
+		SessionExplicit: true,
+		Body:            []byte(`{"messages":[{"role":"user","content":"first prompt"}]}`),
+	}
+	sessionStore := &contentModerationTestSessionStore{
+		acquireErr: fmt.Errorf("redis down"),
+	}
+	svc := NewContentModerationService(
+		&contentModerationTestSettingRepo{values: map[string]string{
+			SettingKeyRiskControlEnabled:      "true",
+			SettingKeyContentModerationConfig: string(rawCfg),
+		}},
+		&contentModerationTestRepo{},
+		&contentModerationTestHashCache{},
+		nil,
+		nil,
+		nil,
+		nil,
+	).SetSessionStore(sessionStore)
+
+	firstDecision, err := svc.Check(context.Background(), input)
+	require.NoError(t, err)
+	require.True(t, firstDecision.Allowed)
+	require.False(t, firstDecision.Blocked)
+	require.Eventually(t, func() bool { return requestCount.Load() == 1 }, time.Second, 10*time.Millisecond)
+
+	sessionScope := contentModerationSessionScope(input)
+	time.Sleep(150 * time.Millisecond)
+	blocked, err := sessionStore.IsBlocked(context.Background(), sessionScope)
+	require.NoError(t, err)
+	require.False(t, blocked)
+	allowedWindow, err := sessionStore.HasAllowWindow(context.Background(), sessionScope)
+	require.NoError(t, err)
+	require.False(t, allowedWindow)
+
+	secondInput := input
+	secondInput.Body = []byte(`{"messages":[{"role":"user","content":"second prompt"}]}`)
+	secondDecision, err := svc.Check(context.Background(), secondInput)
+	require.NoError(t, err)
+	require.True(t, secondDecision.Allowed)
+	require.False(t, secondDecision.Blocked)
 }
 
 func TestContentModerationStatusTracksPreBlockSyncMetrics(t *testing.T) {
@@ -1264,6 +2362,70 @@ func TestContentModerationStatusTracksPreBlockLocalBlocks(t *testing.T) {
 	require.Equal(t, int64(1), status.PreBlockAllowed)
 	require.Equal(t, int64(1), status.PreBlockBlocked)
 	require.Equal(t, int64(0), status.PreBlockErrors)
+}
+
+func TestContentModerationEnqueueAsync_DoesNotRetainBodyAndKeepsAtMostOneImage(t *testing.T) {
+	svc := &ContentModerationService{asyncQueue: make(chan contentModerationTask, 1)}
+	input := ContentModerationCheckInput{
+		UserID:   1001,
+		APIKeyID: 2001,
+		Endpoint: "/v1/responses",
+		Body:     []byte(`{"huge":"payload"}`),
+	}
+	content := ContentModerationInput{
+		Text: "hello",
+		Images: []string{
+			"https://example.com/a.png",
+			"https://example.com/b.png",
+			"https://example.com/c.png",
+		},
+	}
+	cfg := &ContentModerationConfig{QueueSize: 1}
+
+	svc.enqueueAsync(input, cfg, content, "hash", "", ContentModerationModeObserve, "", false)
+
+	task := <-svc.asyncQueue
+	require.Nil(t, task.input.Body)
+	require.Equal(t, "hello", task.content.Text)
+	require.Len(t, task.content.Images, 1)
+	require.Contains(t, content.Images, task.content.Images[0])
+}
+
+func TestContentModerationEnqueueRecord_DoesNotRetainBodyOrCloneHeavyLists(t *testing.T) {
+	svc := &ContentModerationService{asyncQueue: make(chan contentModerationTask, 1)}
+	input := ContentModerationCheckInput{
+		UserID:   1001,
+		APIKeyID: 2001,
+		Endpoint: "/v1/chat/completions",
+		Body:     []byte(`{"huge":"payload"}`),
+	}
+	cfg := &ContentModerationConfig{
+		Mode:                           ContentModerationModePreBlock,
+		EmailOnHit:                     true,
+		AutoBanEnabled:                 true,
+		BanThreshold:                   7,
+		ViolationWindowHours:           48,
+		CyberPolicyExcludeFromBanCount: true,
+		APIKeys:                        []string{"sk-test-1", "sk-test-2"},
+		BlockedKeywords:                []string{"one", "two"},
+		GroupIDs:                       []int64{1, 2, 3},
+	}
+	log := &ContentModerationLog{Action: ContentModerationActionBlock}
+
+	svc.enqueueRecord(input, cfg, log, "hash", true, true)
+
+	task := <-svc.asyncQueue
+	require.Nil(t, task.input.Body)
+	require.NotNil(t, task.config)
+	require.Equal(t, cfg.Mode, task.config.Mode)
+	require.Equal(t, cfg.EmailOnHit, task.config.EmailOnHit)
+	require.Equal(t, cfg.AutoBanEnabled, task.config.AutoBanEnabled)
+	require.Equal(t, cfg.BanThreshold, task.config.BanThreshold)
+	require.Equal(t, cfg.ViolationWindowHours, task.config.ViolationWindowHours)
+	require.Equal(t, cfg.CyberPolicyExcludeFromBanCount, task.config.CyberPolicyExcludeFromBanCount)
+	require.Empty(t, task.config.APIKeys)
+	require.Empty(t, task.config.BlockedKeywords)
+	require.Empty(t, task.config.GroupIDs)
 }
 
 func TestBuildContentModerationTestAuditResult_UsesConfiguredThresholdsOnly(t *testing.T) {
@@ -1434,6 +2596,114 @@ func TestContentModerationCheck_PreHashUsesRedisHashCache(t *testing.T) {
 	require.Zero(t, logs[0].ViolationCount)
 	require.False(t, logs[0].AutoBanned)
 	require.Empty(t, userRepo.updated)
+}
+
+func TestContentModerationCheck_PreHashMatchesLegacyOpenAIChatHash(t *testing.T) {
+	cfg := defaultContentModerationConfig()
+	cfg.Enabled = true
+	cfg.Mode = ContentModerationModePreBlock
+	cfg.PreHashCheckEnabled = true
+	cfg.BlockMessage = "命中历史风险输入"
+	rawCfg, err := json.Marshal(cfg)
+	require.NoError(t, err)
+
+	body := []byte(`{
+		"messages":[
+			{"role":"user","content":"earlier user prompt"},
+			{"role":"assistant","content":"assistant reply"},
+			{"role":"user","content":"latest blocked prompt"}
+		]
+	}`)
+	current := ExtractContentModerationInput(ContentModerationProtocolOpenAIChat, body)
+	current.Normalize()
+	legacy := extractLegacyContentModerationInput(ContentModerationProtocolOpenAIChat, body)
+	legacy.Normalize()
+	require.NotEqual(t, current.Hash(), legacy.Hash())
+
+	hashCache := &contentModerationTestHashCache{hashes: map[string]struct{}{
+		legacy.Hash(): {},
+	}}
+	repo := &contentModerationTestRepo{}
+	svc := NewContentModerationService(
+		&contentModerationTestSettingRepo{values: map[string]string{
+			SettingKeyRiskControlEnabled:      "true",
+			SettingKeyContentModerationConfig: string(rawCfg),
+		}},
+		repo,
+		hashCache,
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+
+	decision, err := svc.Check(context.Background(), ContentModerationCheckInput{
+		UserID:   1001,
+		Protocol: ContentModerationProtocolOpenAIChat,
+		Body:     body,
+	})
+	require.NoError(t, err)
+	require.True(t, decision.Blocked)
+	require.Equal(t, ContentModerationActionHashBlock, decision.Action)
+	require.Equal(t, legacy.Hash(), decision.InputHash)
+	require.Equal(t, []string{current.Hash(), legacy.Hash()}, hashCache.snapshotChecked())
+	logs := requireContentModerationLogCount(t, repo, 1)
+	require.Equal(t, ContentModerationActionHashBlock, logs[0].Action)
+	require.Equal(t, "earlier user prompt latest blocked prompt", logs[0].InputExcerpt)
+}
+
+func TestContentModerationCheck_PreHashMatchesLegacyOpenAIResponsesHash(t *testing.T) {
+	cfg := defaultContentModerationConfig()
+	cfg.Enabled = true
+	cfg.Mode = ContentModerationModePreBlock
+	cfg.PreHashCheckEnabled = true
+	cfg.BlockMessage = "命中历史风险输入"
+	rawCfg, err := json.Marshal(cfg)
+	require.NoError(t, err)
+
+	body := []byte(`{
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"earlier user prompt"}]},
+			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"assistant reply"}]},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"latest blocked prompt"}]}
+		]
+	}`)
+	current := ExtractContentModerationInput(ContentModerationProtocolOpenAIResponses, body)
+	current.Normalize()
+	legacy := extractLegacyContentModerationInput(ContentModerationProtocolOpenAIResponses, body)
+	legacy.Normalize()
+	require.NotEqual(t, current.Hash(), legacy.Hash())
+
+	hashCache := &contentModerationTestHashCache{hashes: map[string]struct{}{
+		legacy.Hash(): {},
+	}}
+	repo := &contentModerationTestRepo{}
+	svc := NewContentModerationService(
+		&contentModerationTestSettingRepo{values: map[string]string{
+			SettingKeyRiskControlEnabled:      "true",
+			SettingKeyContentModerationConfig: string(rawCfg),
+		}},
+		repo,
+		hashCache,
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+
+	decision, err := svc.Check(context.Background(), ContentModerationCheckInput{
+		UserID:   1001,
+		Protocol: ContentModerationProtocolOpenAIResponses,
+		Body:     body,
+	})
+	require.NoError(t, err)
+	require.True(t, decision.Blocked)
+	require.Equal(t, ContentModerationActionHashBlock, decision.Action)
+	require.Equal(t, legacy.Hash(), decision.InputHash)
+	require.Equal(t, []string{current.Hash(), legacy.Hash()}, hashCache.snapshotChecked())
+	logs := requireContentModerationLogCount(t, repo, 1)
+	require.Equal(t, ContentModerationActionHashBlock, logs[0].Action)
+	require.Equal(t, "earlier user prompt latest blocked prompt", logs[0].InputExcerpt)
 }
 
 func TestContentModerationCheck_HashBlockLogsDoNotIncreaseNextViolationCount(t *testing.T) {
@@ -1736,7 +3006,7 @@ func TestContentModerationCheck_AsyncFlaggedWritesRedisHashCache(t *testing.T) {
 	decision := svc.checkSync(context.Background(), ContentModerationCheckInput{
 		Protocol: ContentModerationProtocolOpenAIChat,
 		Body:     []byte(`{"messages":[{"role":"user","content":"bad prompt"}]}`),
-	}, cfg, ContentModerationInput{Text: "bad prompt"}, strings.Repeat("b", 64), contentModerationIntPtr(25), false)
+	}, cfg, ContentModerationInput{Text: "bad prompt"}, strings.Repeat("b", 64), "", contentModerationIntPtr(25), false, false)
 
 	require.False(t, decision.Blocked)
 	requireRecordedHashCount(t, hashCache, 1)

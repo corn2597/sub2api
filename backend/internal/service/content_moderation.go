@@ -25,9 +25,10 @@ import (
 )
 
 const (
-	ContentModerationModeOff      = "off"
-	ContentModerationModeObserve  = "observe"
-	ContentModerationModePreBlock = "pre_block"
+	ContentModerationModeOff        = "off"
+	ContentModerationModeObserve    = "observe"
+	ContentModerationModePreBlock   = "pre_block"
+	ContentModerationModeAsyncBlock = "async_block"
 
 	contentModerationAPIKeysModeAppend  = "append"
 	contentModerationAPIKeysModeReplace = "replace"
@@ -36,6 +37,8 @@ const (
 	ContentModerationActionBlock        = "block"
 	ContentModerationActionHashBlock    = "hash_block"
 	ContentModerationActionKeywordBlock = "keyword_block"
+	ContentModerationActionAsyncBlock   = "async_block"
+	ContentModerationActionSessionBlock = "session_block"
 	ContentModerationActionError        = "error"
 	ContentModerationActionCyberPolicy  = "cyber_policy" // cyber_policy 硬阻断的风控日志 action（封号计数排除按此值过滤）
 
@@ -91,6 +94,10 @@ const (
 	contentModerationCleanupInterval = 24 * time.Hour
 	contentModerationCleanupTimeout  = 30 * time.Minute
 	contentModerationCleanupDelay    = 5 * time.Minute
+
+	contentModerationSessionAllowWindowTTL = 5 * time.Minute
+	contentModerationSessionBlockTTL       = 30 * 24 * time.Hour
+	contentModerationSessionInflightTTL    = 5 * time.Minute
 )
 
 var contentModerationCategoryOrder = []string{
@@ -295,18 +302,20 @@ type ContentModerationModelFilter struct {
 }
 
 type ContentModerationCheckInput struct {
-	RequestID  string
-	UserID     int64
-	UserEmail  string
-	APIKeyID   int64
-	APIKeyName string
-	GroupID    *int64
-	GroupName  string
-	Endpoint   string
-	Provider   string
-	Model      string
-	Protocol   string
-	Body       []byte
+	RequestID       string
+	UserID          int64
+	UserEmail       string
+	APIKeyID        int64
+	APIKeyName      string
+	GroupID         *int64
+	GroupName       string
+	Endpoint        string
+	Provider        string
+	Model           string
+	Protocol        string
+	SessionKey      string
+	SessionExplicit bool
+	Body            []byte
 }
 
 type ContentModerationInput struct {
@@ -371,6 +380,8 @@ type ContentModerationDecision struct {
 	HighestScore    float64            `json:"highest_score"`
 	CategoryScores  map[string]float64 `json:"category_scores"`
 	Action          string             `json:"action"`
+	AuditAttempted  bool               `json:"-"`
+	AuditSucceeded  bool               `json:"-"`
 }
 
 type ContentModerationLog struct {
@@ -485,10 +496,20 @@ type ContentModerationHashCache interface {
 	CountFlaggedInputHashes(ctx context.Context) (int64, error)
 }
 
+type ContentModerationSessionStore interface {
+	IsBlocked(ctx context.Context, scope string) (bool, error)
+	MarkBlocked(ctx context.Context, scope string, ttl time.Duration) error
+	HasAllowWindow(ctx context.Context, scope string) (bool, error)
+	MarkAllowWindow(ctx context.Context, scope string, ttl time.Duration) error
+	AcquireInflight(ctx context.Context, scope string, ttl time.Duration) (bool, error)
+	ClearInflight(ctx context.Context, scope string) error
+}
+
 type ContentModerationService struct {
 	settingRepo              SettingRepository
 	repo                     ContentModerationRepository
 	hashCache                ContentModerationHashCache
+	sessionStore             ContentModerationSessionStore
 	groupRepo                GroupRepository
 	userRepo                 UserRepository
 	authCacheInvalidator     APIKeyAuthCacheInvalidator
@@ -519,11 +540,23 @@ type contentModerationTask struct {
 	input            ContentModerationCheckInput
 	content          ContentModerationInput
 	inputHash        string
+	legacyInputHash  string
+	queuedMode       string
+	sessionScope     string
+	inflightOwned    bool
 	log              *ContentModerationLog
 	config           *ContentModerationConfig
 	recordHash       bool
 	applySideEffects bool
 	enqueuedAt       time.Time
+}
+
+type contentModerationSyncEvaluation struct {
+	decision         *ContentModerationDecision
+	log              *ContentModerationLog
+	recordHash       bool
+	recordLegacyHash bool
+	applySideEffects bool
 }
 
 type contentModerationKeyHealth struct {
@@ -573,6 +606,14 @@ func NewContentModerationService(
 		go svc.cleanupWorker()
 	}
 	return svc
+}
+
+func (s *ContentModerationService) SetSessionStore(store ContentModerationSessionStore) *ContentModerationService {
+	if s == nil {
+		return s
+	}
+	s.sessionStore = store
+	return s
 }
 
 func (s *ContentModerationService) GetConfig(ctx context.Context) (*ContentModerationConfigView, error) {
@@ -862,6 +903,50 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 		return allow, nil
 	}
 	content := ExtractContentModerationInput(input.Protocol, input.Body)
+	content.Normalize()
+	sessionScope := contentModerationSessionScope(input)
+	preBlockSessionModeration := cfg.Mode == ContentModerationModePreBlock && sessionScope != "" && isOpenAISessionModerationProtocol(input.Protocol) && s.sessionStore != nil
+	asyncBlockSessionModeration := cfg.Mode == ContentModerationModeAsyncBlock && input.SessionExplicit && sessionScope != "" && isOpenAISessionModerationProtocol(input.Protocol) && s.sessionStore != nil
+	sessionBlockScope := ""
+	if preBlockSessionModeration || asyncBlockSessionModeration {
+		sessionBlockScope = sessionScope
+	}
+	if sessionBlockScope != "" {
+		blocked, err := s.sessionStore.IsBlocked(ctx, sessionBlockScope)
+		if err != nil {
+			slog.Warn("content_moderation.session_block_check_failed",
+				"user_id", input.UserID,
+				"api_key_id", input.APIKeyID,
+				"endpoint", input.Endpoint,
+				"protocol", input.Protocol,
+				"error", err)
+		} else if blocked {
+			if cfg.Mode == ContentModerationModePreBlock {
+				s.recordPreBlockSyncMetric(0, ContentModerationActionSessionBlock)
+			}
+			slog.Info("content_moderation.session_block",
+				"user_id", input.UserID,
+				"api_key_id", input.APIKeyID,
+				"group_id", contentModerationLogGroupID(input.GroupID),
+				"endpoint", input.Endpoint,
+				"protocol", input.Protocol,
+				"session_scope", sessionBlockScope)
+			scores := map[string]float64{"session": 1.0}
+			log := s.buildLog(input, cfg, ContentModerationActionSessionBlock, true, "session", 1.0, scores, content.ExcerptText(), nil, nil, "")
+			s.enqueueRecord(input, cfg, log, "", false, false)
+			return &ContentModerationDecision{
+				Allowed:         false,
+				Blocked:         true,
+				Flagged:         true,
+				Message:         cfg.BlockMessage,
+				StatusCode:      cfg.BlockStatus,
+				HighestCategory: "session",
+				HighestScore:    1.0,
+				CategoryScores:  scores,
+				Action:          ContentModerationActionSessionBlock,
+			}, nil
+		}
+	}
 	if content.IsEmpty() {
 		slog.Info("content_moderation.skip_empty_input",
 			"user_id", input.UserID,
@@ -872,7 +957,6 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 			"body_bytes", len(input.Body))
 		return allow, nil
 	}
-	content.Normalize()
 	slog.Info("content_moderation.input_extracted",
 		"user_id", input.UserID,
 		"api_key_id", input.APIKeyID,
@@ -882,18 +966,23 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 		"text_runes", len([]rune(content.Text)),
 		"image_count", len(content.Images))
 	hashText := content.Hash()
-	if cfg.Mode == ContentModerationModePreBlock {
+	legacyHashText := extractLegacyContentModerationHash(input.Protocol, input.Body, content)
+	if cfg.Mode == ContentModerationModePreBlock || cfg.Mode == ContentModerationModeAsyncBlock {
 		if cfg.KeywordBlockingMode != ContentModerationKeywordModeAPIOnly && len(cfg.BlockedKeywords) > 0 {
 			if keyword, hit := matchBlockedKeyword(content.Text, cfg.BlockedKeywords); hit {
-				s.recordPreBlockSyncMetric(0, ContentModerationActionKeywordBlock)
+				if cfg.Mode == ContentModerationModePreBlock {
+					s.recordPreBlockSyncMetric(0, ContentModerationActionKeywordBlock)
+				}
 				slog.Info("content_moderation.keyword_block",
 					"user_id", input.UserID,
 					"api_key_id", input.APIKeyID,
 					"group_id", contentModerationLogGroupID(input.GroupID),
 					"endpoint", input.Endpoint,
 					"protocol", input.Protocol,
+					"mode", cfg.Mode,
 					"keyword_blocking_mode", cfg.KeywordBlockingMode,
 					"keyword", keyword)
+				s.markSessionBlockedIfNeeded(ctx, input, sessionBlockScope)
 				scores := map[string]float64{contentModerationKeywordCategory: 1.0}
 				log := s.buildLog(input, cfg, ContentModerationActionKeywordBlock, true, contentModerationKeywordCategory, 1.0, scores, content.ExcerptText(), nil, nil, "")
 				log.MatchedKeyword = keyword
@@ -911,19 +1000,24 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 				}, nil
 			}
 		}
-		if cfg.KeywordBlockingMode == ContentModerationKeywordModeKeywordOnly {
-			s.recordPreBlockSyncMetric(0, ContentModerationActionAllow)
+		keywordOnlySkipsAPIAudit := cfg.KeywordBlockingMode == ContentModerationKeywordModeKeywordOnly &&
+			!(cfg.Mode == ContentModerationModeAsyncBlock && asyncBlockSessionModeration)
+		if keywordOnlySkipsAPIAudit {
+			if cfg.Mode == ContentModerationModePreBlock {
+				s.recordPreBlockSyncMetric(0, ContentModerationActionAllow)
+			}
 			slog.Info("content_moderation.skip_api_keyword_only",
 				"user_id", input.UserID,
 				"api_key_id", input.APIKeyID,
 				"group_id", contentModerationLogGroupID(input.GroupID),
 				"endpoint", input.Endpoint,
-				"protocol", input.Protocol)
+				"protocol", input.Protocol,
+				"mode", cfg.Mode)
 			return allow, nil
 		}
 	}
 	if cfg.PreHashCheckEnabled && s.hashCache != nil {
-		matched, err := s.hashCache.HasFlaggedInputHash(ctx, hashText)
+		matchedHash, matched, err := s.findMatchedFlaggedInputHash(ctx, hashText, legacyHashText)
 		if err != nil {
 			slog.Warn("content_moderation.hash_check_failed", "user_id", input.UserID, "endpoint", input.Endpoint, "error", err)
 		}
@@ -937,26 +1031,49 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 				"group_id", contentModerationLogGroupID(input.GroupID),
 				"endpoint", input.Endpoint,
 				"protocol", input.Protocol,
-				"input_hash", hashText)
+				"input_hash", matchedHash)
 			message := cfg.BlockMessage
 			if message != "" {
-				message = fmt.Sprintf("%s（hash: %s）", message, hashText)
+				message = fmt.Sprintf("%s（hash: %s）", message, matchedHash)
 			}
+			s.markSessionBlockedIfNeeded(ctx, input, sessionBlockScope)
 			scores := map[string]float64{"hash": 1.0}
 			log := s.buildLog(input, cfg, ContentModerationActionHashBlock, true, "hash", 1.0, scores, content.ExcerptText(), nil, nil, "")
-			s.enqueueRecord(input, cfg, log, hashText, false, false)
+			s.enqueueRecord(input, cfg, log, matchedHash, false, false)
 			return &ContentModerationDecision{
 				Allowed:    false,
 				Blocked:    true,
 				Flagged:    true,
 				Message:    message,
 				StatusCode: cfg.BlockStatus,
-				InputHash:  hashText,
+				InputHash:  matchedHash,
 				Action:     ContentModerationActionHashBlock,
 			}, nil
 		}
 	}
-	if !cfg.shouldSample(hashText) {
+	if sessionBlockScope != "" {
+		allowedWindow, err := s.sessionStore.HasAllowWindow(ctx, sessionBlockScope)
+		if err != nil {
+			slog.Warn("content_moderation.session_allow_window_check_failed",
+				"user_id", input.UserID,
+				"api_key_id", input.APIKeyID,
+				"endpoint", input.Endpoint,
+				"protocol", input.Protocol,
+				"error", err)
+		} else if allowedWindow {
+			if cfg.Mode == ContentModerationModePreBlock {
+				s.recordPreBlockSyncMetric(0, ContentModerationActionAllow)
+			}
+			slog.Info("content_moderation.skip_session_allow_window",
+				"user_id", input.UserID,
+				"api_key_id", input.APIKeyID,
+				"group_id", contentModerationLogGroupID(input.GroupID),
+				"endpoint", input.Endpoint,
+				"protocol", input.Protocol,
+				"session_scope", sessionBlockScope)
+			return allow, nil
+		}
+	} else if !cfg.shouldSample(hashText) {
 		if cfg.Mode == ContentModerationModePreBlock {
 			s.recordPreBlockSyncMetric(0, ContentModerationActionAllow)
 		}
@@ -989,15 +1106,84 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 			"endpoint", input.Endpoint,
 			"protocol", input.Protocol,
 			"queue_len", len(s.asyncQueue))
-		s.enqueueAsync(input, cfg, content, hashText)
+		s.enqueueAsync(input, cfg, content, hashText, legacyHashText, cfg.Mode, "", false)
+		return allow, nil
+	}
+	if cfg.Mode == ContentModerationModeAsyncBlock {
+		if asyncBlockSessionModeration {
+			inflightOwned := false
+			acquired := true
+			if s.sessionStore != nil {
+				acquired, err = s.sessionStore.AcquireInflight(ctx, sessionBlockScope, contentModerationSessionInflightTTL)
+				if err != nil {
+					slog.Warn("content_moderation.session_inflight_acquire_failed",
+						"user_id", input.UserID,
+						"api_key_id", input.APIKeyID,
+						"endpoint", input.Endpoint,
+						"protocol", input.Protocol,
+						"session_scope", sessionBlockScope,
+						"error", err)
+				} else if !acquired {
+					slog.Info("content_moderation.skip_session_inflight",
+						"user_id", input.UserID,
+						"api_key_id", input.APIKeyID,
+						"group_id", contentModerationLogGroupID(input.GroupID),
+						"endpoint", input.Endpoint,
+						"protocol", input.Protocol,
+						"session_scope", sessionBlockScope)
+					return allow, nil
+				} else {
+					inflightOwned = true
+				}
+			}
+			slog.Info("content_moderation.enqueue_async_block",
+				"user_id", input.UserID,
+				"api_key_id", input.APIKeyID,
+				"group_id", contentModerationLogGroupID(input.GroupID),
+				"endpoint", input.Endpoint,
+				"protocol", input.Protocol,
+				"session_scope", sessionBlockScope,
+				"queue_len", len(s.asyncQueue))
+			if !s.enqueueAsync(input, cfg, content, hashText, legacyHashText, cfg.Mode, sessionBlockScope, inflightOwned) {
+				s.clearSessionInflightIfNeeded(ctx, input, sessionBlockScope, inflightOwned)
+			}
+		} else {
+			slog.Info("content_moderation.enqueue_async_block_fallback",
+				"user_id", input.UserID,
+				"api_key_id", input.APIKeyID,
+				"group_id", contentModerationLogGroupID(input.GroupID),
+				"endpoint", input.Endpoint,
+				"protocol", input.Protocol,
+				"sample_rate", cfg.SampleRate,
+				"session_explicit", input.SessionExplicit,
+				"queue_len", len(s.asyncQueue))
+			s.enqueueAsync(input, cfg, content, hashText, legacyHashText, cfg.Mode, "", false)
+		}
 		return allow, nil
 	}
 
-	return s.checkSync(ctx, input, cfg, content, hashText, nil, true), nil
+	decision := s.checkSync(ctx, input, cfg, content, hashText, legacyHashText, nil, true, false)
+	if preBlockSessionModeration && decision != nil {
+		switch {
+		case decision.Blocked:
+			s.markSessionBlockedIfNeeded(ctx, input, sessionBlockScope)
+		case decision.AuditSucceeded:
+			s.markSessionAllowWindowIfNeeded(ctx, input, sessionBlockScope)
+		}
+	}
+	return decision, nil
 }
 
-func (s *ContentModerationService) checkSync(ctx context.Context, input ContentModerationCheckInput, cfg *ContentModerationConfig, content ContentModerationInput, hashText string, queueDelay *int, allowBlock bool) *ContentModerationDecision {
-	allow := &ContentModerationDecision{Allowed: true, Action: ContentModerationActionAllow}
+func (s *ContentModerationService) checkSync(ctx context.Context, input ContentModerationCheckInput, cfg *ContentModerationConfig, content ContentModerationInput, hashText string, legacyHashText string, queueDelay *int, allowBlock bool, asyncBlockOnFlag bool) *ContentModerationDecision {
+	evaluation := s.evaluateSync(ctx, input, cfg, content, queueDelay, allowBlock, asyncBlockOnFlag)
+	if evaluation == nil {
+		return nil
+	}
+	s.finalizeSyncEvaluation(ctx, input, cfg, hashText, legacyHashText, queueDelay, evaluation)
+	return evaluation.decision
+}
+
+func (s *ContentModerationService) evaluateSync(ctx context.Context, input ContentModerationCheckInput, cfg *ContentModerationConfig, content ContentModerationInput, queueDelay *int, allowBlock bool, asyncBlockOnFlag bool) *contentModerationSyncEvaluation {
 	trackPreBlock := queueDelay == nil && allowBlock && cfg != nil && cfg.Mode == ContentModerationModePreBlock
 	if trackPreBlock {
 		s.preBlockActive.Add(1)
@@ -1026,17 +1212,37 @@ func (s *ContentModerationService) checkSync(ctx context.Context, input ContentM
 		}
 		if cfg.RecordNonHits {
 			log := s.buildLog(input, cfg, ContentModerationActionError, false, "", 0, nil, content.ExcerptText(), &latency, queueDelay, err.Error())
-			_ = s.repo.CreateLog(ctx, log)
+			return &contentModerationSyncEvaluation{
+				decision: &ContentModerationDecision{
+					Allowed:        true,
+					Action:         ContentModerationActionAllow,
+					AuditAttempted: true,
+					AuditSucceeded: false,
+				},
+				log: log,
+			}
 		}
-		return allow
+		return &contentModerationSyncEvaluation{
+			decision: &ContentModerationDecision{
+				Allowed:        true,
+				Action:         ContentModerationActionAllow,
+				AuditAttempted: true,
+				AuditSucceeded: false,
+			},
+		}
 	}
 
 	flagged, highestCategory, highestScore := evaluateModerationScores(result.CategoryScores, cfg.Thresholds)
 	action := ContentModerationActionAllow
 	blocked := false
-	if allowBlock && flagged && cfg.Mode == ContentModerationModePreBlock {
-		action = ContentModerationActionBlock
-		blocked = true
+	if flagged {
+		switch {
+		case allowBlock && cfg.Mode == ContentModerationModePreBlock:
+			action = ContentModerationActionBlock
+			blocked = true
+		case asyncBlockOnFlag:
+			action = ContentModerationActionAsyncBlock
+		}
 	}
 	if trackPreBlock {
 		s.recordPreBlockSyncMetric(latency, action)
@@ -1057,16 +1263,16 @@ func (s *ContentModerationService) checkSync(ctx context.Context, input ContentM
 		"highest_score", highestScore,
 		"latency_ms", latency,
 		"queue_delay_ms", queueDelay)
+	evaluation := &contentModerationSyncEvaluation{
+		recordHash:       flagged,
+		recordLegacyHash: flagged,
+		applySideEffects: flagged,
+	}
 	if flagged || cfg.RecordNonHits {
-		log := s.buildLog(input, cfg, action, flagged, highestCategory, highestScore, result.CategoryScores, content.ExcerptText(), &latency, queueDelay, "")
-		if queueDelay == nil && cfg.Mode == ContentModerationModePreBlock {
-			s.enqueueRecord(input, cfg, log, hashText, flagged, flagged)
-		} else {
-			s.persistContentModerationLog(ctx, cfg, log, hashText, flagged, flagged)
-		}
+		evaluation.log = s.buildLog(input, cfg, action, flagged, highestCategory, highestScore, result.CategoryScores, content.ExcerptText(), &latency, queueDelay, "")
 	}
 	if blocked {
-		return &ContentModerationDecision{
+		evaluation.decision = &ContentModerationDecision{
 			Allowed:         false,
 			Blocked:         true,
 			Flagged:         true,
@@ -1076,9 +1282,12 @@ func (s *ContentModerationService) checkSync(ctx context.Context, input ContentM
 			HighestScore:    highestScore,
 			CategoryScores:  result.CategoryScores,
 			Action:          action,
+			AuditAttempted:  true,
+			AuditSucceeded:  true,
 		}
+		return evaluation
 	}
-	return &ContentModerationDecision{
+	evaluation.decision = &ContentModerationDecision{
 		Allowed:         true,
 		Flagged:         flagged,
 		Message:         "",
@@ -1086,6 +1295,23 @@ func (s *ContentModerationService) checkSync(ctx context.Context, input ContentM
 		HighestScore:    highestScore,
 		CategoryScores:  result.CategoryScores,
 		Action:          action,
+		AuditAttempted:  true,
+		AuditSucceeded:  true,
+	}
+	return evaluation
+}
+
+func (s *ContentModerationService) finalizeSyncEvaluation(ctx context.Context, input ContentModerationCheckInput, cfg *ContentModerationConfig, hashText string, legacyHashText string, queueDelay *int, evaluation *contentModerationSyncEvaluation) {
+	if s == nil || evaluation == nil || evaluation.log == nil {
+		return
+	}
+	if queueDelay == nil && cfg.Mode == ContentModerationModePreBlock {
+		s.enqueueRecord(input, cfg, evaluation.log, hashText, evaluation.recordHash, evaluation.applySideEffects)
+	} else {
+		s.persistContentModerationLog(ctx, cfg, evaluation.log, hashText, evaluation.recordHash, evaluation.applySideEffects)
+	}
+	if evaluation.recordLegacyHash {
+		s.recordLegacyFlaggedInputHash(ctx, legacyHashText)
 	}
 }
 
@@ -1099,7 +1325,7 @@ func (s *ContentModerationService) recordPreBlockSyncMetric(latencyMS int, actio
 	}
 	s.preBlockLatencyTotalMS.Add(int64(latencyMS))
 	switch action {
-	case ContentModerationActionBlock, ContentModerationActionHashBlock, ContentModerationActionKeywordBlock:
+	case ContentModerationActionBlock, ContentModerationActionHashBlock, ContentModerationActionKeywordBlock, ContentModerationActionSessionBlock:
 		s.preBlockBlocked.Add(1)
 	case ContentModerationActionError:
 		s.preBlockErrors.Add(1)
@@ -1108,9 +1334,107 @@ func (s *ContentModerationService) recordPreBlockSyncMetric(latencyMS int, actio
 	}
 }
 
-func (s *ContentModerationService) enqueueAsync(input ContentModerationCheckInput, cfg *ContentModerationConfig, content ContentModerationInput, hashText string) {
-	if s == nil || s.asyncQueue == nil {
+func isOpenAISessionModerationProtocol(protocol string) bool {
+	switch protocol {
+	case ContentModerationProtocolOpenAIResponses, ContentModerationProtocolOpenAIChat:
+		return true
+	default:
+		return false
+	}
+}
+
+func contentModerationSessionScope(input ContentModerationCheckInput) string {
+	sessionKey := strings.TrimSpace(input.SessionKey)
+	if sessionKey == "" {
+		return ""
+	}
+	owner := fmt.Sprintf("user:%d", input.UserID)
+	if input.UserID <= 0 {
+		owner = fmt.Sprintf("key:%d", input.APIKeyID)
+	}
+	return fmt.Sprintf("openai:%d:%s:%s", contentModerationLogGroupID(input.GroupID), owner, sessionKey)
+}
+
+func (s *ContentModerationService) markSessionBlockedIfNeeded(ctx context.Context, input ContentModerationCheckInput, sessionScope string) {
+	if s == nil || s.sessionStore == nil || strings.TrimSpace(sessionScope) == "" {
 		return
+	}
+	if err := s.sessionStore.MarkBlocked(ctx, sessionScope, contentModerationSessionBlockTTL); err != nil {
+		slog.Warn("content_moderation.session_block_mark_failed",
+			"user_id", input.UserID,
+			"api_key_id", input.APIKeyID,
+			"endpoint", input.Endpoint,
+			"protocol", input.Protocol,
+			"error", err)
+	}
+}
+
+func (s *ContentModerationService) markSessionAllowWindowIfNeeded(ctx context.Context, input ContentModerationCheckInput, sessionScope string) {
+	if s == nil || s.sessionStore == nil || strings.TrimSpace(sessionScope) == "" {
+		return
+	}
+	if err := s.sessionStore.MarkAllowWindow(ctx, sessionScope, contentModerationSessionAllowWindowTTL); err != nil {
+		slog.Warn("content_moderation.session_allow_window_mark_failed",
+			"user_id", input.UserID,
+			"api_key_id", input.APIKeyID,
+			"endpoint", input.Endpoint,
+			"protocol", input.Protocol,
+			"error", err)
+	}
+}
+
+func (s *ContentModerationService) clearSessionInflightIfNeeded(ctx context.Context, input ContentModerationCheckInput, sessionScope string, owned bool) {
+	if s == nil || s.sessionStore == nil || !owned || strings.TrimSpace(sessionScope) == "" {
+		return
+	}
+	if err := s.sessionStore.ClearInflight(ctx, sessionScope); err != nil {
+		slog.Warn("content_moderation.session_inflight_clear_failed",
+			"user_id", input.UserID,
+			"api_key_id", input.APIKeyID,
+			"endpoint", input.Endpoint,
+			"protocol", input.Protocol,
+			"error", err)
+	}
+}
+
+func (s *ContentModerationService) findMatchedFlaggedInputHash(ctx context.Context, hashes ...string) (string, bool, error) {
+	if s == nil || s.hashCache == nil {
+		return "", false, nil
+	}
+	seen := make(map[string]struct{}, len(hashes))
+	for _, raw := range hashes {
+		hash := normalizeContentModerationHash(raw)
+		if hash == "" {
+			continue
+		}
+		if _, ok := seen[hash]; ok {
+			continue
+		}
+		seen[hash] = struct{}{}
+		matched, err := s.hashCache.HasFlaggedInputHash(ctx, hash)
+		if err != nil {
+			return "", false, err
+		}
+		if matched {
+			return hash, true, nil
+		}
+	}
+	return "", false, nil
+}
+
+func (s *ContentModerationService) recordLegacyFlaggedInputHash(ctx context.Context, legacyHash string) {
+	legacyHash = normalizeContentModerationHash(legacyHash)
+	if s == nil || s.hashCache == nil || legacyHash == "" {
+		return
+	}
+	if err := s.hashCache.RecordFlaggedInputHash(ctx, legacyHash); err != nil {
+		slog.Warn("content_moderation.record_legacy_hash_failed", "input_hash", legacyHash, "error", err)
+	}
+}
+
+func (s *ContentModerationService) enqueueAsync(input ContentModerationCheckInput, cfg *ContentModerationConfig, content ContentModerationInput, hashText string, legacyHashText string, queuedMode string, sessionScope string, inflightOwned bool) bool {
+	if s == nil || s.asyncQueue == nil {
+		return false
 	}
 	queueSize := defaultContentModerationQueueSize
 	if cfg != nil && cfg.QueueSize > 0 {
@@ -1119,20 +1443,26 @@ func (s *ContentModerationService) enqueueAsync(input ContentModerationCheckInpu
 	if len(s.asyncQueue) >= queueSize {
 		slog.Warn("content_moderation.async_queue_full", "user_id", input.UserID, "endpoint", input.Endpoint, "queue_size", queueSize)
 		s.asyncDropped.Add(1)
-		return
+		return false
 	}
 	task := contentModerationTask{
-		input:      input,
-		content:    content,
-		inputHash:  hashText,
-		enqueuedAt: time.Now(),
+		input:           queueSafeContentModerationInput(input),
+		content:         queueSafeContentModerationContent(content),
+		inputHash:       hashText,
+		legacyInputHash: legacyHashText,
+		queuedMode:      strings.TrimSpace(queuedMode),
+		sessionScope:    strings.TrimSpace(sessionScope),
+		inflightOwned:   inflightOwned,
+		enqueuedAt:      time.Now(),
 	}
 	select {
 	case s.asyncQueue <- task:
 		s.asyncEnqueued.Add(1)
+		return true
 	default:
 		slog.Warn("content_moderation.async_queue_full", "user_id", input.UserID, "endpoint", input.Endpoint)
 		s.asyncDropped.Add(1)
+		return false
 	}
 }
 
@@ -1154,10 +1484,10 @@ func (s *ContentModerationService) enqueueRecord(input ContentModerationCheckInp
 		return
 	}
 	task := contentModerationTask{
-		input:            input,
+		input:            queueSafeContentModerationInput(input),
 		inputHash:        inputHash,
 		log:              log,
-		config:           cloneContentModerationConfig(cfg),
+		config:           cloneContentModerationRecordConfig(cfg),
 		recordHash:       recordHash,
 		applySideEffects: applySideEffects,
 		enqueuedAt:       time.Now(),
@@ -1195,6 +1525,7 @@ func (s *ContentModerationService) worker(id int) {
 					slog.Error("content_moderation.worker_panic", "worker_id", id, "recover", r)
 				}
 			}()
+			defer s.clearSessionInflightIfNeeded(ctx, task.input, task.sessionScope, task.inflightOwned)
 			if task.log != nil {
 				s.asyncActive.Add(1)
 				defer s.asyncActive.Add(-1)
@@ -1217,10 +1548,32 @@ func (s *ContentModerationService) worker(id int) {
 			if !cfg.includesModel(task.input.Model) {
 				return
 			}
+			if task.queuedMode == ContentModerationModeAsyncBlock && cfg.Mode != ContentModerationModeAsyncBlock {
+				return
+			}
 			s.asyncActive.Add(1)
 			defer s.asyncActive.Add(-1)
 			queueDelay := int(time.Since(task.enqueuedAt).Milliseconds())
-			_ = s.checkSync(ctx, task.input, cfg, task.content, task.inputHash, &queueDelay, false)
+			taskCfg := cfg
+			if strings.TrimSpace(task.queuedMode) != "" && task.log == nil {
+				taskCfg = cloneContentModerationConfig(cfg)
+				taskCfg.Mode = task.queuedMode
+			}
+			sessionAsyncBlock := task.queuedMode == ContentModerationModeAsyncBlock && strings.TrimSpace(task.sessionScope) != ""
+			evaluation := s.evaluateSync(ctx, task.input, taskCfg, task.content, &queueDelay, false, sessionAsyncBlock)
+			var decision *ContentModerationDecision
+			if evaluation != nil {
+				decision = evaluation.decision
+			}
+			if sessionAsyncBlock && decision != nil {
+				switch {
+				case decision.Flagged && decision.AuditSucceeded:
+					s.markSessionBlockedIfNeeded(ctx, task.input, task.sessionScope)
+				case decision.AuditSucceeded:
+					s.markSessionAllowWindowIfNeeded(ctx, task.input, task.sessionScope)
+				}
+			}
+			s.finalizeSyncEvaluation(ctx, task.input, taskCfg, task.inputHash, task.legacyInputHash, &queueDelay, evaluation)
 			s.asyncProcessed.Add(1)
 		}()
 	}
@@ -1471,7 +1824,7 @@ func (s *ContentModerationService) validateConfig(ctx context.Context, cfg *Cont
 	}
 	cfg.normalize()
 	switch cfg.Mode {
-	case ContentModerationModeOff, ContentModerationModeObserve, ContentModerationModePreBlock:
+	case ContentModerationModeOff, ContentModerationModeObserve, ContentModerationModePreBlock, ContentModerationModeAsyncBlock:
 	default:
 		return infraerrors.BadRequest("INVALID_CONTENT_MODERATION_MODE", "内容审计模式无效")
 	}
@@ -1869,6 +2222,33 @@ func cloneContentModerationConfig(cfg *ContentModerationConfig) *ContentModerati
 		Models: append([]string(nil), cfg.ModelFilter.Models...),
 	}
 	return &clone
+}
+
+func cloneContentModerationRecordConfig(cfg *ContentModerationConfig) *ContentModerationConfig {
+	if cfg == nil {
+		return nil
+	}
+	return &ContentModerationConfig{
+		Mode:                           cfg.Mode,
+		EmailOnHit:                     cfg.EmailOnHit,
+		AutoBanEnabled:                 cfg.AutoBanEnabled,
+		BanThreshold:                   cfg.BanThreshold,
+		ViolationWindowHours:           cfg.ViolationWindowHours,
+		CyberPolicyExcludeFromBanCount: cfg.CyberPolicyExcludeFromBanCount,
+	}
+}
+
+func queueSafeContentModerationInput(input ContentModerationCheckInput) ContentModerationCheckInput {
+	input.Body = nil
+	return input
+}
+
+func queueSafeContentModerationContent(content ContentModerationInput) ContentModerationInput {
+	if len(content.Images) == 0 {
+		return content
+	}
+	content.Images = limitContentModerationImages(append([]string(nil), content.Images...))
+	return content
 }
 
 func (cfg *ContentModerationConfig) normalize() {

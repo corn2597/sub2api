@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
@@ -13,10 +14,14 @@ import (
 )
 
 func (h *GatewayHandler) checkContentModeration(c *gin.Context, reqLog *zap.Logger, apiKey *service.APIKey, subject middleware2.AuthSubject, protocol string, model string, body []byte) *service.ContentModerationDecision {
+	return h.checkContentModerationWithSession(c, reqLog, apiKey, subject, protocol, model, "", false, body)
+}
+
+func (h *GatewayHandler) checkContentModerationWithSession(c *gin.Context, reqLog *zap.Logger, apiKey *service.APIKey, subject middleware2.AuthSubject, protocol string, model string, sessionKey string, sessionExplicit bool, body []byte) *service.ContentModerationDecision {
 	if h == nil || h.contentModerationService == nil {
 		return nil
 	}
-	return runContentModeration(c, reqLog, h.contentModerationService, apiKey, subject, protocol, model, body)
+	return runContentModeration(c, reqLog, h.contentModerationService, apiKey, subject, protocol, model, sessionKey, sessionExplicit, body)
 }
 
 func contentModerationStatus(decision *service.ContentModerationDecision) int {
@@ -31,17 +36,38 @@ func contentModerationErrorCode(decision *service.ContentModerationDecision) str
 }
 
 func (h *OpenAIGatewayHandler) checkContentModeration(c *gin.Context, reqLog *zap.Logger, apiKey *service.APIKey, subject middleware2.AuthSubject, protocol string, model string, body []byte) *service.ContentModerationDecision {
+	return h.checkContentModerationWithSession(c, reqLog, apiKey, subject, protocol, model, "", false, body)
+}
+
+func (h *OpenAIGatewayHandler) checkContentModerationWithSession(c *gin.Context, reqLog *zap.Logger, apiKey *service.APIKey, subject middleware2.AuthSubject, protocol string, model string, sessionKey string, sessionExplicit bool, body []byte) *service.ContentModerationDecision {
 	if h == nil || h.contentModerationService == nil {
 		return nil
 	}
-	return runContentModeration(c, reqLog, h.contentModerationService, apiKey, subject, protocol, model, body)
+	return runContentModeration(c, reqLog, h.contentModerationService, apiKey, subject, protocol, model, sessionKey, sessionExplicit, body)
 }
 
-func runContentModeration(c *gin.Context, reqLog *zap.Logger, svc *service.ContentModerationService, apiKey *service.APIKey, subject middleware2.AuthSubject, protocol string, model string, body []byte) *service.ContentModerationDecision {
+func openAIModerationSessionContext(c *gin.Context, subject middleware2.AuthSubject, apiKey *service.APIKey) *service.SessionContext {
+	if c == nil || apiKey == nil {
+		return nil
+	}
+	return &service.SessionContext{
+		ClientIP:  ip.GetClientIP(c),
+		UserAgent: c.GetHeader("User-Agent"),
+		APIKeyID:  apiKey.ID,
+		UserID:    subject.UserID,
+	}
+}
+
+func openAIModerationSession(c *gin.Context, body []byte, routingSessionHash string, sessionCtx *service.SessionContext) (string, bool) {
+	resolved := service.ResolveOpenAIAuditSession(c, body, routingSessionHash, sessionCtx)
+	return strings.TrimSpace(resolved.Hash), resolved.Explicit
+}
+
+func runContentModeration(c *gin.Context, reqLog *zap.Logger, svc *service.ContentModerationService, apiKey *service.APIKey, subject middleware2.AuthSubject, protocol string, model string, sessionKey string, sessionExplicit bool, body []byte) *service.ContentModerationDecision {
 	if svc == nil || c == nil || c.Request == nil {
 		return nil
 	}
-	input := buildContentModerationInput(c, apiKey, subject, protocol, model, body)
+	input := buildContentModerationInput(c, apiKey, subject, protocol, model, sessionKey, sessionExplicit, body)
 	if reqLog != nil {
 		reqLog.Info("content_moderation.gateway_check_start",
 			zap.String("request_id", input.RequestID),
@@ -54,6 +80,8 @@ func runContentModeration(c *gin.Context, reqLog *zap.Logger, svc *service.Conte
 			zap.String("provider", input.Provider),
 			zap.String("protocol", input.Protocol),
 			zap.String("model", input.Model),
+			zap.String("session_key", input.SessionKey),
+			zap.Bool("session_explicit", input.SessionExplicit),
 			zap.Int("body_bytes", len(body)),
 		)
 	}
@@ -79,15 +107,17 @@ func runContentModeration(c *gin.Context, reqLog *zap.Logger, svc *service.Conte
 	return decision
 }
 
-func buildContentModerationInput(c *gin.Context, apiKey *service.APIKey, subject middleware2.AuthSubject, protocol string, model string, body []byte) service.ContentModerationCheckInput {
+func buildContentModerationInput(c *gin.Context, apiKey *service.APIKey, subject middleware2.AuthSubject, protocol string, model string, sessionKey string, sessionExplicit bool, body []byte) service.ContentModerationCheckInput {
 	input := service.ContentModerationCheckInput{
-		RequestID: contentModerationRequestID(c.Request.Context()),
-		UserID:    subject.UserID,
-		Endpoint:  GetInboundEndpoint(c),
-		Provider:  contentModerationProvider(apiKey),
-		Model:     strings.TrimSpace(model),
-		Protocol:  protocol,
-		Body:      body,
+		RequestID:       contentModerationRequestID(c.Request.Context()),
+		UserID:          subject.UserID,
+		Endpoint:        GetInboundEndpoint(c),
+		Provider:        contentModerationProvider(apiKey),
+		Model:           strings.TrimSpace(model),
+		Protocol:        protocol,
+		SessionKey:      strings.TrimSpace(sessionKey),
+		SessionExplicit: sessionExplicit,
+		Body:            body,
 	}
 	if forcedPlatform, ok := middleware2.GetForcePlatformFromContext(c); ok {
 		input.Provider = strings.TrimSpace(forcedPlatform)

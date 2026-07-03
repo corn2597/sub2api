@@ -261,7 +261,10 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	setOpsRequestContext(c, reqModel, reqStream)
 	setOpsEndpointContext(c, "", int16(service.RequestTypeFromLegacy(reqStream, false)))
 
-	if decision := h.checkContentModeration(c, reqLog, apiKey, subject, service.ContentModerationProtocolOpenAIResponses, reqModel, body); decision != nil && decision.Blocked {
+	sessionHash := h.gatewayService.GenerateSessionHash(c, sessionHashBody)
+	sessionCtx := openAIModerationSessionContext(c, subject, apiKey)
+	moderationSessionHash, moderationSessionExplicit := openAIModerationSession(c, sessionHashBody, sessionHash, sessionCtx)
+	if decision := h.checkContentModerationWithSession(c, reqLog, apiKey, subject, service.ContentModerationProtocolOpenAIResponses, reqModel, moderationSessionHash, moderationSessionExplicit, body); decision != nil && decision.Blocked {
 		h.errorResponse(c, contentModerationStatus(decision), contentModerationErrorCode(decision), decision.Message)
 		return
 	}
@@ -324,8 +327,6 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		return
 	}
 
-	// Generate session hash (header first; fallback to prompt_cache_key)
-	sessionHash := h.gatewayService.GenerateSessionHash(c, sessionHashBody)
 	if h.rejectIfCyberSessionBlocked(c, apiKey, sessionHashBody, reqModel, cyberBlockFormatResponses) {
 		return
 	}
@@ -1279,7 +1280,14 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	setOpsRequestContext(c, reqModel, true)
 	setOpsEndpointContext(c, "", int16(service.RequestTypeWSV2))
 
-	if decision := h.checkContentModeration(c, reqLog, apiKey, subject, service.ContentModerationProtocolOpenAIResponses, reqModel, firstMessage); decision != nil && decision.Blocked {
+	sessionHash := h.gatewayService.GenerateSessionHashWithFallback(
+		c,
+		firstMessage,
+		openAIWSIngressFallbackSessionSeed(subject.UserID, apiKey.ID, apiKey.GroupID),
+	)
+	sessionCtx := openAIModerationSessionContext(c, subject, apiKey)
+	moderationSessionHash, moderationSessionExplicit := openAIModerationSession(c, firstMessage, sessionHash, sessionCtx)
+	if decision := h.checkContentModerationWithSession(c, reqLog, apiKey, subject, service.ContentModerationProtocolOpenAIResponses, reqModel, moderationSessionHash, moderationSessionExplicit, firstMessage); decision != nil && decision.Blocked {
 		writeContentModerationWSError(ctx, wsConn, decision)
 		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, decision.Message)
 		return
@@ -1363,11 +1371,6 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		return
 	}
 
-	sessionHash := h.gatewayService.GenerateSessionHashWithFallback(
-		c,
-		firstMessage,
-		openAIWSIngressFallbackSessionSeed(subject.UserID, apiKey.ID, apiKey.GroupID),
-	)
 	maxAccountSwitches := h.maxAccountSwitches
 	switchCount := 0
 	failedAccountIDs := make(map[int64]struct{})
@@ -1472,7 +1475,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				if model == "" {
 					model = reqModel
 				}
-				if decision := h.checkContentModeration(c, reqLog, apiKey, subject, service.ContentModerationProtocolOpenAIResponses, model, payload); decision != nil && decision.Blocked {
+				if decision := h.checkContentModerationWithSession(c, reqLog, apiKey, subject, service.ContentModerationProtocolOpenAIResponses, model, moderationSessionHash, moderationSessionExplicit, payload); decision != nil && decision.Blocked {
 					writeContentModerationWSError(ctx, wsConn, decision)
 					return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, decision.Message, nil)
 				}

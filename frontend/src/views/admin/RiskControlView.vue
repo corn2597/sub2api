@@ -1282,6 +1282,7 @@ const settingsTabs = computed<Array<{ id: SettingsTab; label: string }>>(() => [
 
 const modeOptions = computed<SelectOption[]>(() => [
   { value: 'pre_block', label: t('admin.riskControl.modePreBlock') },
+  { value: 'async_block', label: t('admin.riskControl.modeAsyncBlock') },
   { value: 'observe', label: t('admin.riskControl.modeObserve') },
   { value: 'off', label: t('admin.riskControl.modeOff') },
 ])
@@ -1295,7 +1296,9 @@ const keywordBlockingModeOptions = computed<Array<{ value: KeywordBlockingMode; 
   {
     value: 'keyword_only',
     label: t('admin.riskControl.keywordModeKeywordOnly'),
-    description: t('admin.riskControl.keywordModeKeywordOnlyDesc'),
+    description: configForm.mode === 'async_block'
+      ? t('admin.riskControl.keywordModeKeywordOnlyAsyncBlockDesc')
+      : t('admin.riskControl.keywordModeKeywordOnlyDesc'),
   },
   {
     value: 'api_only',
@@ -1355,7 +1358,7 @@ const keywordNotice = computed<KeywordNoticeView>(() => {
       description: t('admin.riskControl.keywordModeApiOnlyDesc'),
     }
   }
-  if (configForm.mode !== 'pre_block') {
+  if (configForm.mode !== 'pre_block' && configForm.mode !== 'async_block') {
     return {
       ...keywordNoticeTones.warning,
       title: t('admin.riskControl.blockedKeywordsModeWarning', { mode: modeLabel(configForm.mode) }),
@@ -1365,13 +1368,17 @@ const keywordNotice = computed<KeywordNoticeView>(() => {
   if (strategy === 'keyword_only') {
     return {
       ...keywordNoticeTones.info,
-      title: t('admin.riskControl.keywordModeKeywordOnlyNotice'),
-      description: t('admin.riskControl.keywordModeKeywordOnlyDesc'),
+      title: configForm.mode === 'async_block'
+        ? t('admin.riskControl.keywordModeKeywordOnlyAsyncBlockNotice')
+        : t('admin.riskControl.keywordModeKeywordOnlyNotice'),
+      description: configForm.mode === 'async_block'
+        ? t('admin.riskControl.keywordModeKeywordOnlyAsyncBlockDesc')
+        : t('admin.riskControl.keywordModeKeywordOnlyDesc'),
     }
   }
   return {
     ...keywordNoticeTones.info,
-    title: t('admin.riskControl.blockedKeywordsPreBlockHint'),
+    title: t('admin.riskControl.blockedKeywordsSyncHint'),
     description: t('admin.riskControl.blockedKeywordsDescription'),
   }
 })
@@ -1380,6 +1387,7 @@ const resultOptions = computed<SelectOption[]>(() => [
   { value: '', label: t('admin.riskControl.result.all') },
   { value: 'hit', label: t('admin.riskControl.result.hit') },
   { value: 'blocked', label: t('admin.riskControl.result.blocked') },
+  { value: 'async_block', label: t('admin.riskControl.result.asyncBlock') },
   { value: 'pass', label: t('admin.riskControl.result.pass') },
   { value: 'error', label: t('admin.riskControl.result.error') },
 ])
@@ -1591,7 +1599,7 @@ const runtimeMode = computed<ModerationMode>(() => status.value?.mode ?? configF
 
 const showPreBlockRuntimeCard = computed(() => runtimeMode.value === 'pre_block')
 
-const showWorkerRuntimeCard = computed(() => runtimeMode.value === 'observe')
+const showWorkerRuntimeCard = computed(() => runtimeMode.value === 'observe' || runtimeMode.value === 'async_block')
 
 const preBlockMetricItems = computed(() => [
   {
@@ -2108,6 +2116,7 @@ function modeLabel(mode: ModerationMode): string {
 function modeDescription(mode: ModerationMode): string {
   const descriptions: Record<ModerationMode, string> = {
     pre_block: t('admin.riskControl.modePreBlockDesc'),
+    async_block: t('admin.riskControl.modeAsyncBlockDesc'),
     observe: t('admin.riskControl.modeObserveDesc'),
     off: t('admin.riskControl.modeOffDesc'),
   }
@@ -2117,6 +2126,8 @@ function modeDescription(mode: ModerationMode): string {
 function resultLabel(row: ContentModerationLog): string {
   if (row.action === 'cyber_policy') return t('admin.riskControl.action.cyberPolicy')
   if (row.action === 'keyword_block') return t('admin.riskControl.action.keywordBlock')
+  if (row.action === 'async_block') return t('admin.riskControl.action.asyncBlock')
+  if (row.action === 'session_block') return t('admin.riskControl.action.sessionBlock')
   if (row.action === 'block') return t('admin.riskControl.action.block')
   if (row.action === 'error' || row.error) return t('admin.riskControl.action.error')
   if (row.flagged) return t('admin.riskControl.result.hit')
@@ -2124,7 +2135,7 @@ function resultLabel(row: ContentModerationLog): string {
 }
 
 function resultBadgeClass(row: ContentModerationLog): string {
-  if (row.action === 'block' || row.action === 'keyword_block' || row.action === 'cyber_policy') return 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300'
+  if (row.action === 'block' || row.action === 'keyword_block' || row.action === 'async_block' || row.action === 'session_block' || row.action === 'cyber_policy') return 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300'
   if (row.action === 'error' || row.error) return 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300'
   if (row.flagged) return 'bg-pink-100 text-pink-700 dark:bg-pink-900/30 dark:text-pink-300'
   return 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300'

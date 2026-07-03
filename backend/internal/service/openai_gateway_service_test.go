@@ -353,6 +353,44 @@ func TestOpenAIGatewayService_GenerateSessionHash_ContentFallback(t *testing.T) 
 	require.NotEqual(t, hash, hashDifferent, "different content should produce different hash")
 }
 
+func TestGenerateOpenAIAuditSessionHash_ContentFallbackKeepsStableHashPerClient(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+	sessionCtx := &SessionContext{ClientIP: "1.2.3.4", UserAgent: "codex-cli/1.0", APIKeyID: 101}
+	turn1 := []byte(`{"model":"gpt-5.4","messages":[{"role":"system","content":"You are helpful."},{"role":"user","content":"Hello"}]}`)
+	turn2 := []byte(`{"model":"gpt-5.4","messages":[{"role":"system","content":"You are helpful."},{"role":"user","content":"Hello"},{"role":"assistant","content":"Hi!"},{"role":"user","content":"Add tests"}]}`)
+	require.Equal(t, deriveOpenAIContentSessionSeed(turn1), deriveOpenAIContentSessionSeed(turn2))
+
+	h1 := GenerateOpenAIAuditSessionHash(c, turn1, sessionCtx)
+	h2 := GenerateOpenAIAuditSessionHash(c, turn2, sessionCtx)
+	require.NotEmpty(t, h1)
+	require.Equal(t, h1, h2, "later turns should stay in the same moderation session when the prefix is stable")
+
+	otherClient := &SessionContext{ClientIP: "9.9.9.9", UserAgent: "other-client/1.0", APIKeyID: 202}
+	h3 := GenerateOpenAIAuditSessionHash(c, turn1, otherClient)
+	require.NotEmpty(t, h3)
+	require.NotEqual(t, h1, h3, "content-derived fallback should still separate different clients")
+}
+
+func TestGenerateOpenAIAuditSessionHash_ExplicitSignalWinsOverContext(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	c.Request.Header.Set("session_id", "explicit-session")
+
+	body := []byte(`{"model":"gpt-5.4","messages":[{"role":"user","content":"Hello"}]}`)
+
+	h1 := GenerateOpenAIAuditSessionHash(c, body, &SessionContext{ClientIP: "1.1.1.1", UserAgent: "ua-a", APIKeyID: 1})
+	h2 := GenerateOpenAIAuditSessionHash(c, body, &SessionContext{ClientIP: "2.2.2.2", UserAgent: "ua-b", APIKeyID: 2})
+
+	require.Equal(t, DeriveSessionHashFromSeed("explicit-session"), h1)
+	require.Equal(t, h1, h2, "explicit session signals should override client-context differences")
+}
+
 func TestOpenAIGatewayService_GenerateSessionHash_ExplicitSignalWinsOverContent(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()

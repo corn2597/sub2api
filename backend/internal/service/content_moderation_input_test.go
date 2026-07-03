@@ -1,13 +1,15 @@
 package service
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
 
-// 当数组末尾不是用户消息时（典型场景：Agent 工具循环结束于 tool/assistant），
-// 应直接跳过审计——不再回溯查找历史中的某条用户消息。
+// Anthropic/Gemini 仍保持“最后一个用户回合”语义；
+// OpenAI Chat / Responses 改成聚合当前 payload 中全部 user 文本。
 
 func TestExtractContentModerationInput_AnthropicAgentToolLoopSkipsAudit(t *testing.T) {
 	body := []byte(`{
@@ -64,7 +66,7 @@ func TestExtractContentModerationInput_AnthropicStreamResendExtractsResend(t *te
 	require.Equal(t, "重发", input.Text)
 }
 
-func TestExtractContentModerationInput_OpenAIChatAgentToolLoopSkipsAudit(t *testing.T) {
+func TestExtractContentModerationInput_OpenAIChatAgentToolLoopKeepsAllUserMessages(t *testing.T) {
 	body := []byte(`{
 		"messages": [
 			{"role":"system","content":"sys"},
@@ -76,11 +78,11 @@ func TestExtractContentModerationInput_OpenAIChatAgentToolLoopSkipsAudit(t *test
 
 	input := ExtractContentModerationInput(ContentModerationProtocolOpenAIChat, body)
 
-	require.Empty(t, input.Text)
+	require.Equal(t, "列出我的订单", input.Text)
 	require.Empty(t, input.Images)
 }
 
-func TestExtractContentModerationInput_OpenAIChatMultiTurnExtractsLatestUser(t *testing.T) {
+func TestExtractContentModerationInput_OpenAIChatMultiTurnExtractsAllUserMessages(t *testing.T) {
 	body := []byte(`{
 		"messages": [
 			{"role":"user","content":"Q1"},
@@ -91,7 +93,7 @@ func TestExtractContentModerationInput_OpenAIChatMultiTurnExtractsLatestUser(t *
 
 	input := ExtractContentModerationInput(ContentModerationProtocolOpenAIChat, body)
 
-	require.Equal(t, "Q2", input.Text)
+	require.Equal(t, "Q1 Q2", input.Text)
 }
 
 func TestExtractContentModerationInput_GeminiAgentToolLoopSkipsAudit(t *testing.T) {
@@ -135,7 +137,7 @@ func TestExtractContentModerationInput_GeminiMultiTurnExtractsLatestUser(t *test
 	require.Equal(t, "Q2", input.Text)
 }
 
-func TestExtractContentModerationInput_ResponsesAgentToolLoopSkipsAudit(t *testing.T) {
+func TestExtractContentModerationInput_ResponsesAgentToolLoopKeepsAllUserMessages(t *testing.T) {
 	body := []byte(`{
 		"input":[
 			{"type":"message","role":"user","content":[{"type":"input_text","text":"运行测试"}]},
@@ -146,11 +148,11 @@ func TestExtractContentModerationInput_ResponsesAgentToolLoopSkipsAudit(t *testi
 
 	input := ExtractContentModerationInput(ContentModerationProtocolOpenAIResponses, body)
 
-	require.Empty(t, input.Text)
+	require.Equal(t, "运行测试", input.Text)
 	require.Empty(t, input.Images)
 }
 
-func TestExtractContentModerationInput_ResponsesLastUserMessageExtracted(t *testing.T) {
+func TestExtractContentModerationInput_ResponsesExtractsAllUserMessages(t *testing.T) {
 	body := []byte(`{
 		"input":[
 			{"type":"message","role":"user","content":[{"type":"input_text","text":"first"}]},
@@ -161,10 +163,10 @@ func TestExtractContentModerationInput_ResponsesLastUserMessageExtracted(t *test
 
 	input := ExtractContentModerationInput(ContentModerationProtocolOpenAIResponses, body)
 
-	require.Equal(t, "latest", input.Text)
+	require.Equal(t, "first latest", input.Text)
 }
 
-func TestExtractContentModerationInput_ResponsesLastIsAssistantSkipped(t *testing.T) {
+func TestExtractContentModerationInput_ResponsesKeepsEarlierUserWhenLastIsAssistant(t *testing.T) {
 	body := []byte(`{
 		"input":[
 			{"type":"message","role":"user","content":[{"type":"input_text","text":"q1"}]},
@@ -174,6 +176,52 @@ func TestExtractContentModerationInput_ResponsesLastIsAssistantSkipped(t *testin
 
 	input := ExtractContentModerationInput(ContentModerationProtocolOpenAIResponses, body)
 
-	require.Empty(t, input.Text)
+	require.Equal(t, "q1", input.Text)
 	require.Empty(t, input.Images)
+}
+
+func TestExtractContentModerationInput_OpenAIChatLongConversationStaysBounded(t *testing.T) {
+	first := strings.Repeat("a", 7000)
+	second := strings.Repeat("b", 7000)
+	body := []byte(fmt.Sprintf(`{
+		"messages": [
+			{"role":"user","content":%q},
+			{"role":"assistant","content":"ignored"},
+			{"role":"user","content":%q}
+		]
+	}`, first, second))
+
+	input := ExtractContentModerationInput(ContentModerationProtocolOpenAIChat, body)
+
+	require.Len(t, []rune(input.Text), maxModerationInputRunes)
+	require.Contains(t, input.Text, strings.Repeat("a", 128))
+	require.Contains(t, input.Text, strings.Repeat("b", 128))
+	require.NotContains(t, input.Text, "ignored")
+}
+
+func BenchmarkExtractContentModerationInput_OpenAIChatLargeMultiTurn(b *testing.B) {
+	var payload strings.Builder
+	payload.Grow(256 * 1024)
+	payload.WriteString(`{"messages":[`)
+	for i := range 40 {
+		if i > 0 {
+			payload.WriteByte(',')
+		}
+		payload.WriteString(fmt.Sprintf(`{"role":"user","content":%q}`, strings.Repeat(string(rune('a'+(i%3))), 4096)))
+		if i != 39 {
+			payload.WriteByte(',')
+			payload.WriteString(`{"role":"assistant","content":"ok"}`)
+		}
+	}
+	payload.WriteString(`]}`)
+	body := []byte(payload.String())
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		input := ExtractContentModerationInput(ContentModerationProtocolOpenAIChat, body)
+		if len([]rune(input.Text)) != maxModerationInputRunes {
+			b.Fatalf("unexpected moderation text length: %d", len([]rune(input.Text)))
+		}
+	}
 }
