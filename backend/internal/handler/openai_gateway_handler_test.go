@@ -1725,6 +1725,22 @@ data: {"type":"response.failed","error":{"message":"This content was flagged"}}
 		require.False(t, reported)
 	})
 
+	t.Run("committed terminal sse after write is already communicated", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, EndpointResponses, nil)
+		before := c.Writer.Size()
+		_, _ = c.Writer.WriteString(`event: response.failed
+data: {"type":"response.failed","response":{"error":{"code":"stream_timeout","message":"upstream stream idle"}}}
+
+`)
+		service.MarkResponseCommitted(c)
+
+		reported := openAIForwardErrorAlreadyCommunicated(c, before, errors.New("stream data interval timeout"))
+
+		require.True(t, reported)
+	})
+
 	// H-2: cyber_policy 命中且响应已写出时，即便 err 前缀不在白名单（非流式 400 cyber
 	// 返回 "openai cyber_policy:"、透传账号返回 "upstream error:"），也须判定已透传，避免
 	// ensureForwardErrorResponse 在已写出的完整响应尾部追加 SSE 污染响应体。

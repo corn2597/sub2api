@@ -1219,9 +1219,10 @@ func TestOpenAIStreamingTimeout(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "stream data interval timeout") {
 		t.Fatalf("expected stream timeout error, got %v", err)
 	}
-	if !strings.Contains(rec.Body.String(), "\"type\":\"error\"") || !strings.Contains(rec.Body.String(), "stream_timeout") {
-		t.Fatalf("expected OpenAI-compatible error SSE event, got %q", rec.Body.String())
+	if !strings.Contains(rec.Body.String(), "event: response.failed") || !strings.Contains(rec.Body.String(), "stream_timeout") {
+		t.Fatalf("expected Responses terminal error SSE event, got %q", rec.Body.String())
 	}
+	require.True(t, IsResponseCommitted(c), "service-emitted terminal SSE must suppress handler fallback")
 }
 
 func TestOpenAIStreamingContextCanceledReturnsIncompleteErrorWithoutInjectingErrorEvent(t *testing.T) {
@@ -1983,9 +1984,10 @@ func TestOpenAIStreamingTooLong(t *testing.T) {
 	if !errors.Is(err, bufio.ErrTooLong) {
 		t.Fatalf("expected ErrTooLong, got %v", err)
 	}
-	if !strings.Contains(rec.Body.String(), "\"type\":\"error\"") || !strings.Contains(rec.Body.String(), "response_too_large") {
-		t.Fatalf("expected OpenAI-compatible error SSE event, got %q", rec.Body.String())
+	if !strings.Contains(rec.Body.String(), "event: response.failed") || !strings.Contains(rec.Body.String(), "response_too_large") {
+		t.Fatalf("expected Responses terminal error SSE event, got %q", rec.Body.String())
 	}
+	require.True(t, IsResponseCommitted(c), "line-too-long terminal SSE must suppress handler fallback")
 }
 
 func TestOpenAINonStreamingContentTypePassThrough(t *testing.T) {

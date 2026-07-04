@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -106,6 +107,23 @@ func TestGatewayForwardErrorAlreadyCommunicated(t *testing.T) {
 		reported := gatewayForwardErrorAlreadyCommunicated(c, before, errors.New("stream read error: unexpected EOF"))
 
 		require.False(t, reported)
+	})
+
+	t.Run("committed terminal sse after write is already communicated", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, EndpointMessages, nil)
+		c.Header("Content-Type", "text/event-stream")
+		before := c.Writer.Size()
+		_, _ = c.Writer.WriteString(`event: error
+data: {"type":"error","error":{"type":"stream_timeout","message":"upstream stream idle"}}
+
+`)
+		service.MarkResponseCommitted(c)
+
+		reported := gatewayForwardErrorAlreadyCommunicated(c, before, errors.New("stream data interval timeout"))
+
+		require.True(t, reported)
 	})
 
 	t.Run("no write still needs fallback", func(t *testing.T) {

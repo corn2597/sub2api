@@ -3227,6 +3227,7 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 		errorEventSent = true
 		_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: {\"error\":\"%s\"}\n\n", reason)
 		flusher.Flush()
+		MarkResponseCommitted(c)
 	}
 
 	for {
@@ -4077,6 +4078,7 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 		errorEventSent = true
 		_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: {\"error\":\"%s\"}\n\n", reason)
 		flusher.Flush()
+		MarkResponseCommitted(c)
 	}
 
 	// finishUsage 是获取 processor 最终 usage 的辅助函数
