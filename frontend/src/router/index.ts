@@ -812,10 +812,18 @@ router.beforeEach(async (to, _from, next) => {
     }
   }
 
+  if ((to.meta.requiresPayment || to.meta.requiresRiskControl) && !appStore.publicSettingsLoaded) {
+    await appStore.fetchPublicSettings()
+  }
+
 
   // Check payment requirement (internal payment system only)
   if (to.meta.requiresPayment) {
-    const paymentEnabled = appStore.cachedPublicSettings?.payment_enabled
+    let paymentEnabled = appStore.cachedPublicSettings?.payment_enabled === true
+    if (!paymentEnabled) {
+      const refreshed = await appStore.fetchPublicSettings(true)
+      paymentEnabled = refreshed?.payment_enabled === true
+    }
     if (!paymentEnabled) {
       next(authStore.isAdmin ? '/admin/dashboard' : '/dashboard')
       return
@@ -823,7 +831,11 @@ router.beforeEach(async (to, _from, next) => {
   }
 
   if (to.meta.requiresRiskControl) {
-    const riskControlEnabled = appStore.cachedPublicSettings?.risk_control_enabled === true
+    let riskControlEnabled = appStore.cachedPublicSettings?.risk_control_enabled === true
+    if (!riskControlEnabled) {
+      const refreshed = await appStore.fetchPublicSettings(true)
+      riskControlEnabled = refreshed?.risk_control_enabled === true
+    }
     if (!riskControlEnabled) {
       next(authStore.isAdmin ? '/admin/settings' : '/dashboard')
       return

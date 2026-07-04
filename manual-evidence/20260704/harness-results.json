@@ -1,0 +1,350 @@
+[
+  {
+    "name": "session-first-sample",
+    "moderation_hits": 2,
+    "decisions": [
+      {
+        "step": "first clean request",
+        "moderation_hits": 1,
+        "allowed": true,
+        "blocked": false,
+        "flagged": false,
+        "action": "allow",
+        "message": "",
+        "status_code": 0,
+        "audit_attempted": false,
+        "audit_succeeded": false
+      },
+      {
+        "step": "second clean request within 5m window",
+        "moderation_hits": 1,
+        "allowed": true,
+        "blocked": false,
+        "flagged": false,
+        "action": "allow",
+        "message": "",
+        "status_code": 0,
+        "audit_attempted": false,
+        "audit_succeeded": false
+      },
+      {
+        "step": "third clean request after window cleared",
+        "moderation_hits": 2,
+        "allowed": true,
+        "blocked": false,
+        "flagged": false,
+        "action": "allow",
+        "message": "",
+        "status_code": 0,
+        "audit_attempted": false,
+        "audit_succeeded": false
+      }
+    ],
+    "logs": [
+      {
+        "action": "allow",
+        "flagged": false,
+        "highest_category": "sexual",
+        "input_excerpt": "first clean prompt",
+        "created_at": "2026-07-04T16:23:49.553323+08:00",
+        "matched_keyword": "",
+        "violation_count": 0
+      },
+      {
+        "action": "allow",
+        "flagged": false,
+        "highest_category": "sexual",
+        "input_excerpt": "third clean prompt",
+        "created_at": "2026-07-04T16:23:49.635357+08:00",
+        "matched_keyword": "",
+        "violation_count": 0
+      }
+    ],
+    "session_snapshot": {
+      "openai:11:user:1001:chat-session-a": {
+        "blocked": false,
+        "allow_window": true,
+        "inflight": false
+      }
+    }
+  },
+  {
+    "name": "session-block",
+    "moderation_hits": 1,
+    "decisions": [
+      {
+        "step": "risky first request is allowed before async audit lands",
+        "moderation_hits": 1,
+        "allowed": true,
+        "blocked": false,
+        "flagged": false,
+        "action": "allow",
+        "message": "",
+        "status_code": 0,
+        "audit_attempted": false,
+        "audit_succeeded": false
+      },
+      {
+        "step": "clean request after async session blacklist",
+        "moderation_hits": 1,
+        "allowed": false,
+        "blocked": true,
+        "flagged": true,
+        "action": "session_block",
+        "message": "内容审计命中风险规则，请调整输入后重试",
+        "status_code": 403,
+        "audit_attempted": false,
+        "audit_succeeded": false
+      }
+    ],
+    "logs": [
+      {
+        "action": "async_block",
+        "flagged": true,
+        "highest_category": "sexual",
+        "input_excerpt": "blocked prompt should be denied",
+        "created_at": "2026-07-04T16:23:57.559852+08:00",
+        "matched_keyword": "",
+        "violation_count": 1
+      },
+      {
+        "action": "session_block",
+        "flagged": true,
+        "highest_category": "session",
+        "input_excerpt": "clean prompt after block",
+        "created_at": "2026-07-04T16:23:57.599781+08:00",
+        "matched_keyword": "",
+        "violation_count": 0
+      }
+    ],
+    "session_snapshot": {
+      "openai:11:user:1001:chat-session-b": {
+        "blocked": true,
+        "allow_window": false,
+        "inflight": false
+      }
+    }
+  },
+  {
+    "name": "all-user-input",
+    "moderation_hits": 1,
+    "decisions": [
+      {
+        "step": "responses request with two user turns",
+        "moderation_hits": 1,
+        "allowed": true,
+        "blocked": false,
+        "flagged": false,
+        "action": "allow",
+        "message": "",
+        "status_code": 0,
+        "audit_attempted": false,
+        "audit_succeeded": false
+      }
+    ],
+    "logs": [
+      {
+        "action": "allow",
+        "flagged": false,
+        "highest_category": "sexual",
+        "input_excerpt": "first user prompt last user prompt",
+        "created_at": "2026-07-04T16:24:04.691253+08:00",
+        "matched_keyword": "",
+        "violation_count": 0
+      }
+    ],
+    "session_snapshot": {
+      "openai:11:user:1001:responses-session-c": {
+        "blocked": false,
+        "allow_window": true,
+        "inflight": false
+      }
+    }
+  },
+  {
+    "name": "session-cross-key",
+    "moderation_hits": 1,
+    "decisions": [
+      {
+        "step": "risky request with api key A",
+        "moderation_hits": 1,
+        "allowed": true,
+        "blocked": false,
+        "flagged": false,
+        "action": "allow",
+        "message": "",
+        "status_code": 0,
+        "audit_attempted": false,
+        "audit_succeeded": false
+      },
+      {
+        "step": "clean request with api key B in same session",
+        "moderation_hits": 1,
+        "allowed": false,
+        "blocked": true,
+        "flagged": true,
+        "action": "session_block",
+        "message": "内容审计命中风险规则，请调整输入后重试",
+        "status_code": 403,
+        "audit_attempted": false,
+        "audit_succeeded": false
+      }
+    ],
+    "logs": [
+      {
+        "action": "async_block",
+        "flagged": true,
+        "highest_category": "sexual",
+        "input_excerpt": "blocked prompt should be denied",
+        "created_at": "2026-07-04T16:24:12.595511+08:00",
+        "matched_keyword": "",
+        "violation_count": 1
+      },
+      {
+        "action": "session_block",
+        "flagged": true,
+        "highest_category": "session",
+        "input_excerpt": "clean prompt after rotating api key",
+        "created_at": "2026-07-04T16:24:12.636398+08:00",
+        "matched_keyword": "",
+        "violation_count": 0
+      }
+    ],
+    "session_snapshot": {
+      "openai:11:user:1001:chat-session-key-rotate": {
+        "blocked": true,
+        "allow_window": false,
+        "inflight": false
+      }
+    }
+  },
+  {
+    "name": "non-explicit-fallback",
+    "moderation_hits": 2,
+    "decisions": [
+      {
+        "step": "fallback session request 1",
+        "moderation_hits": 1,
+        "allowed": true,
+        "blocked": false,
+        "flagged": false,
+        "action": "allow",
+        "message": "",
+        "status_code": 0,
+        "audit_attempted": false,
+        "audit_succeeded": false
+      },
+      {
+        "step": "fallback session request 2 still re-audits instead of session ban",
+        "moderation_hits": 2,
+        "allowed": true,
+        "blocked": false,
+        "flagged": false,
+        "action": "allow",
+        "message": "",
+        "status_code": 0,
+        "audit_attempted": false,
+        "audit_succeeded": false
+      }
+    ],
+    "logs": [
+      {
+        "action": "allow",
+        "flagged": true,
+        "highest_category": "sexual",
+        "input_excerpt": "blocked first fallback prompt",
+        "created_at": "2026-07-04T16:24:17.579655+08:00",
+        "matched_keyword": "",
+        "violation_count": 1
+      },
+      {
+        "action": "allow",
+        "flagged": true,
+        "highest_category": "sexual",
+        "input_excerpt": "blocked second fallback prompt",
+        "created_at": "2026-07-04T16:24:17.621112+08:00",
+        "matched_keyword": "",
+        "violation_count": 2
+      }
+    ],
+    "session_snapshot": {
+      "openai:11:user:1001:fallback-session-hash": {
+        "blocked": false,
+        "allow_window": false,
+        "inflight": false
+      }
+    }
+  },
+  {
+    "name": "session-inflight-dedupe",
+    "moderation_hits": 1,
+    "decisions": [
+      {
+        "step": "concurrent request 1",
+        "moderation_hits": 1,
+        "allowed": true,
+        "blocked": false,
+        "flagged": false,
+        "action": "allow",
+        "message": "",
+        "status_code": 0,
+        "audit_attempted": false,
+        "audit_succeeded": false
+      },
+      {
+        "step": "concurrent request 2",
+        "moderation_hits": 1,
+        "allowed": true,
+        "blocked": false,
+        "flagged": false,
+        "action": "allow",
+        "message": "",
+        "status_code": 0,
+        "audit_attempted": false,
+        "audit_succeeded": false
+      },
+      {
+        "step": "concurrent request 3",
+        "moderation_hits": 1,
+        "allowed": true,
+        "blocked": false,
+        "flagged": false,
+        "action": "allow",
+        "message": "",
+        "status_code": 0,
+        "audit_attempted": false,
+        "audit_succeeded": false
+      },
+      {
+        "step": "concurrent request 4",
+        "moderation_hits": 1,
+        "allowed": true,
+        "blocked": false,
+        "flagged": false,
+        "action": "allow",
+        "message": "",
+        "status_code": 0,
+        "audit_attempted": false,
+        "audit_succeeded": false
+      }
+    ],
+    "logs": [
+      {
+        "action": "allow",
+        "flagged": false,
+        "highest_category": "sexual",
+        "input_excerpt": "slow clean prompt",
+        "created_at": "2026-07-04T16:24:24.878463+08:00",
+        "matched_keyword": "",
+        "violation_count": 0
+      }
+    ],
+    "session_snapshot": {
+      "openai:11:user:1001:session-inflight": {
+        "blocked": false,
+        "allow_window": true,
+        "inflight": false
+      }
+    }
+  }
+]
