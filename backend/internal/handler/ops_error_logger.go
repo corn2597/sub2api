@@ -469,6 +469,28 @@ type opsCaptureWriter struct {
 	buf   bytes.Buffer
 }
 
+type responseWriterUnwrapper interface {
+	UnwrapResponseWriter() gin.ResponseWriter
+}
+
+func responseWriterWraps(writer, target gin.ResponseWriter) bool {
+	for writer != nil {
+		if writer == target {
+			return true
+		}
+		unwrapper, ok := writer.(responseWriterUnwrapper)
+		if !ok {
+			return false
+		}
+		next := unwrapper.UnwrapResponseWriter()
+		if next == nil || next == writer {
+			return false
+		}
+		writer = next
+	}
+	return false
+}
+
 const opsCaptureWriterLimit = 64 * 1024
 
 var opsCaptureWriterPool = sync.Pool{
@@ -533,8 +555,9 @@ func OpsErrorLoggerMiddleware(ops *service.OpsService) gin.HandlerFunc {
 		w := acquireOpsCaptureWriter(originalWriter)
 		defer func() {
 			// Restore the original writer before returning so outer middlewares
-			// don't observe a pooled wrapper that has been released.
-			if c.Writer == w {
+			// don't observe a pooled wrapper that has been released. Compact SSE
+			// keepalive can add an outer writer after this middleware starts.
+			if responseWriterWraps(c.Writer, w) {
 				c.Writer = originalWriter
 			}
 			releaseOpsCaptureWriter(w)

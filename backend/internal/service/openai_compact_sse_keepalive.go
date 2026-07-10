@@ -178,6 +178,16 @@ type openAICompactKeepaliveWriter struct {
 	k *openAICompactSSEKeepalive
 }
 
+// UnwrapResponseWriter exposes the wrapped writer for middleware that owns a
+// pooled response wrapper. It must restore that wrapper before returning it to
+// its pool, even when compact keepalive remains the context's outer writer.
+func (w *openAICompactKeepaliveWriter) UnwrapResponseWriter() gin.ResponseWriter {
+	if w == nil {
+		return nil
+	}
+	return w.ResponseWriter
+}
+
 // suspend 停拍心跳；幂等。任何响应构造（含 Header 访问——写响应必先操作
 // 响应头）都视为请求侧接管 ResponseWriter。
 func (w *openAICompactKeepaliveWriter) suspend() {

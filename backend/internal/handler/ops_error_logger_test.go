@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -132,6 +133,29 @@ func TestOpsErrorLoggerMiddleware_DoesNotBreakOuterMiddlewares(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/messages", nil)
+
+	require.NotPanics(t, func() {
+		r.ServeHTTP(rec, req)
+	})
+	require.Equal(t, http.StatusNoContent, rec.Code)
+}
+
+func TestOpsErrorLoggerMiddleware_RestoresPooledWriterBehindCompactKeepalive(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	r := gin.New()
+	r.Use(middleware2.Recovery())
+	r.Use(middleware2.RequestLogger())
+	r.Use(middleware2.Logger())
+	r.GET("/v1/responses/compact", OpsErrorLoggerMiddleware(nil), func(c *gin.Context) {
+		c.Set(service.OpenAICompactClientStreamKeyForTest(), true)
+		stop := service.StartOpenAICompactSSEKeepalive(c, time.Hour)
+		defer stop()
+		c.Status(http.StatusNoContent)
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/responses/compact", nil)
 
 	require.NotPanics(t, func() {
 		r.ServeHTTP(rec, req)
