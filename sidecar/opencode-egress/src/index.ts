@@ -25,6 +25,10 @@ const wsBackpressureBytes = parsePositiveInteger(
   "SUB2API_EGRESS_WS_BACKPRESSURE_BYTES",
   16 * 1024 * 1024,
 )
+const httpMaxBodyBytes = parsePositiveInteger(
+  "SUB2API_EGRESS_HTTP_MAX_BODY_BYTES",
+  256 * 1024 * 1024,
+)
 const authIssuer = "https://auth.openai.com"
 const deviceUserAgent = `opencode/${OPENCODE_VERSION}`
 const protocolVersion = "3"
@@ -182,21 +186,66 @@ async function proxyHTTP(request: Request) {
   assertOpenCodeFingerprint(headers)
   metrics.http++
   auditOutbound("http", targetURL, headers, method)
+  const targetProxy = proxyValue(request.headers.get("x-sub2api-target-proxy"))
+  // Bun cannot reliably send a server-side ReadableStream through an HTTP
+  // CONNECT proxy: ChatGPT closes the tunnel before returning a response.
+  // Buffer proxied HTTP bodies with a hard cap so Alpha, Chat, and image
+  // requests are emitted as a fixed-length request while direct egress keeps
+  // the original streaming behavior.
+  let requestBody: BodyInit | undefined = method === "GET" || method === "HEAD"
+    ? undefined
+    : request.body
+  if (targetProxy && requestBody) {
+    try {
+      requestBody = await readRequestBody(request, httpMaxBodyBytes)
+    } catch (error) {
+      if (error instanceof RequestBodyTooLarge) {
+        return json({ error: { type: "request_body_too_large", limit_bytes: httpMaxBodyBytes } }, 413)
+      }
+      throw error
+    }
+  }
+
   let upstream: Response
   try {
     upstream = await fetchWithProxy(targetURL, {
       method,
       headers,
-      body: method === "GET" || method === "HEAD" ? undefined : request.body,
+      body: requestBody,
       redirect: "manual",
       signal: request.signal,
-    }, proxyValue(request.headers.get("x-sub2api-target-proxy")))
+    }, targetProxy)
   } catch (error) {
     auditUpstreamFailure(targetURL, error)
     throw error
   }
   auditUpstreamResponse(targetURL, upstream)
   return targetResponse(upstream)
+}
+
+class RequestBodyTooLarge extends Error {}
+
+async function readRequestBody(request: Request, limit: number) {
+  if (!request.body) return Buffer.alloc(0)
+  const reader = request.body.getReader()
+  const chunks: Buffer[] = []
+  let total = 0
+  try {
+    while (true) {
+      const next = await reader.read()
+      if (next.done) break
+      const chunk = Buffer.from(next.value)
+      total += chunk.byteLength
+      if (total > limit) {
+        await reader.cancel()
+        throw new RequestBodyTooLarge()
+      }
+      chunks.push(chunk)
+    }
+  } finally {
+    reader.releaseLock()
+  }
+  return Buffer.concat(chunks, total)
 }
 
 function parseSocketData(request: Request): SocketData | null {
