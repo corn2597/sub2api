@@ -449,12 +449,16 @@ function auditUpstreamResponse(targetURL: string, response: Response) {
 function auditUpstreamFailure(targetURL: string, error: unknown) {
   if (!auditEnabled) return
   const target = new URL(targetURL)
+  const cause = error instanceof Error && error.cause instanceof Error ? error.cause : undefined
   console.log(JSON.stringify({
     event: "opencode_egress_upstream_failure",
     transport: "http",
     host: target.host,
     path: target.pathname,
     error_name: error instanceof Error ? error.name : "Error",
+    error_message: error instanceof Error ? error.message.slice(0, 256) : String(error).slice(0, 256),
+    cause_code: cause && "code" in cause ? String(cause.code).slice(0, 64) : undefined,
+    cause_message: cause ? cause.message.slice(0, 256) : undefined,
   }))
 }
 
