@@ -12,7 +12,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/opencodeegress"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
+	"github.com/stretchr/testify/require"
 )
 
 // contentModerationTestProxyRepo 仅实现审计代理路径用到的 GetByID，其余方法不应被调用。
@@ -98,6 +101,45 @@ func (r *contentModerationTestProxyRepo) CountExpiringSoon(ctx context.Context, 
 }
 
 func moderationProxyIDPtr(v int64) *int64 { return &v }
+
+func TestContentModerationOfficialOpenAIRequestUsesConfiguredEgress(t *testing.T) {
+	var sidecarCalls atomic.Int64
+	sidecar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sidecarCalls.Add(1)
+		require.Equal(t, "/proxy/http", r.URL.Path)
+		require.Equal(t, "secret", r.Header.Get(opencodeegress.SecretHeader))
+		require.Equal(t, opencodeegress.ProtocolVersion, r.Header.Get(opencodeegress.ProtocolHeader))
+		require.Equal(t, "https://api.openai.com/v1/moderations", r.Header.Get(opencodeegress.TargetURLHeader))
+		require.Equal(t, http.MethodPost, r.Header.Get(opencodeegress.TargetMethodHeader))
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(opencodeegress.ProtocolHeader, opencodeegress.ProtocolVersion)
+		_ = json.NewEncoder(w).Encode(moderationAPIResponse{
+			Results: []moderationAPIResult{{Flagged: false}},
+		})
+	}))
+	defer sidecar.Close()
+
+	cfg := &config.Config{}
+	cfg.Gateway.OpenAIEgress = config.OpenAIEgressConfig{
+		Enabled:               true,
+		HTTPEnabled:           true,
+		BaseURL:               sidecar.URL,
+		SharedSecret:          "secret",
+		ControlTimeoutSeconds: 5,
+	}
+	svc := ProvideContentModerationService(nil, nil, nil, nil, nil, nil, nil, nil, cfg)
+
+	moderationCfg := defaultContentModerationConfig()
+	moderationCfg.BaseURL = "https://api.openai.com"
+	moderationCfg.normalize()
+
+	status := 0
+	result, err := svc.callModerationOnceWithInput(context.Background(), moderationCfg, "sk-test", "hello", &status)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, http.StatusOK, status)
+	require.Equal(t, int64(1), sidecarCalls.Load())
+}
 
 // 审计请求必须真正经过配置的代理发出（#2646 核心行为）。
 // 通过一个本地 HTTP 正向代理验证：BaseURL 指向不可直连的假域名，

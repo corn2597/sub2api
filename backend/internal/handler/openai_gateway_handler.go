@@ -2489,6 +2489,11 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			}
 			var failoverErr *service.UpstreamFailoverError
 			if errors.As(err, &failoverErr) {
+				if failoverErr.ClientResponseWritten {
+					releaseAccountSlot()
+					closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, "upstream capacity unavailable; please retry")
+					return
+				}
 				retryPayload, retryCurrentTurn := service.OpenAIWSCurrentTurnRetryPayload(err)
 				nextAttemptMessage, retrySafe := openAIWSNextAttemptMessage(wsAttemptMessage, retryPayload, retryCurrentTurn)
 				if !retrySafe {

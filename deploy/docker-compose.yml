@@ -173,6 +173,16 @@ services:
       - GATEWAY_OPENAI_PROXY_STREAM_CIRCUIT_WINDOW_SECONDS=${GATEWAY_OPENAI_PROXY_STREAM_CIRCUIT_WINDOW_SECONDS:-60}
       - GATEWAY_OPENAI_PROXY_STREAM_CIRCUIT_TTL_SECONDS=${GATEWAY_OPENAI_PROXY_STREAM_CIRCUIT_TTL_SECONDS:-600}
       - GATEWAY_MAX_BODY_SIZE=${GATEWAY_MAX_BODY_SIZE:-268435456}
+      # OpenAI/ChatGPT HTTP, WS and OAuth all use the OpenCode sidecar when enabled.
+      - GATEWAY_OPENAI_EGRESS_ENABLED=${GATEWAY_OPENAI_EGRESS_ENABLED:-true}
+      - GATEWAY_OPENAI_EGRESS_BASE_URL=${GATEWAY_OPENAI_EGRESS_BASE_URL:-http://opencode-egress:12783}
+      - GATEWAY_OPENAI_EGRESS_SHARED_SECRET=${GATEWAY_OPENAI_EGRESS_SHARED_SECRET:-${SUB2API_EGRESS_SECRET:?SUB2API_EGRESS_SECRET is required}}
+      - GATEWAY_OPENAI_EGRESS_CONTROL_TIMEOUT_SECONDS=${GATEWAY_OPENAI_EGRESS_CONTROL_TIMEOUT_SECONDS:-120}
+      - GATEWAY_OPENAI_EGRESS_FALLBACK_TO_DIRECT=${GATEWAY_OPENAI_EGRESS_FALLBACK_TO_DIRECT:-false}
+      - GATEWAY_OPENAI_EGRESS_HTTP_ENABLED=${GATEWAY_OPENAI_EGRESS_HTTP_ENABLED:-true}
+      - GATEWAY_OPENAI_EGRESS_WS_ENABLED=${GATEWAY_OPENAI_EGRESS_WS_ENABLED:-true}
+      - GATEWAY_OPENAI_EGRESS_OAUTH_ENABLED=${GATEWAY_OPENAI_EGRESS_OAUTH_ENABLED:-true}
+      - GATEWAY_OPENAI_EGRESS_ALLOW_PROXY=${GATEWAY_OPENAI_EGRESS_ALLOW_PROXY:-true}
       - GATEWAY_MAX_CONNS_PER_HOST=${GATEWAY_MAX_CONNS_PER_HOST:-1024}
       - GATEWAY_MAX_IDLE_CONNS=${GATEWAY_MAX_IDLE_CONNS:-2560}
       - GATEWAY_MAX_IDLE_CONNS_PER_HOST=${GATEWAY_MAX_IDLE_CONNS_PER_HOST:-120}
@@ -204,6 +214,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      opencode-egress:
+        condition: service_healthy
     networks:
       - sub2api-network
     healthcheck:
@@ -222,6 +234,43 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+
+  # ===========================================================================
+  # OpenCode/Bun OpenAI egress sidecar
+  # ===========================================================================
+  opencode-egress:
+    build:
+      context: ../sidecar/opencode-egress
+      dockerfile: Dockerfile
+    container_name: sub2api-opencode-egress
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      - SUB2API_EGRESS_SECRET=${SUB2API_EGRESS_SECRET:?SUB2API_EGRESS_SECRET is required}
+      - SUB2API_EGRESS_BIND=0.0.0.0
+      - SUB2API_EGRESS_PORT=12783
+      # 256 MiB business payload plus the response.create JSON envelope headroom.
+      # Upgrade this sidecar before rolling the main service.
+      - SUB2API_EGRESS_WS_MAX_PAYLOAD_BYTES=${SUB2API_EGRESS_WS_MAX_PAYLOAD_BYTES:-268500992}
+      - SUB2API_EGRESS_WS_BACKPRESSURE_BYTES=${SUB2API_EGRESS_WS_BACKPRESSURE_BYTES:-16777216}
+      - OPENCODE_VERSION=${OPENCODE_VERSION:-1.18.20}
+    expose:
+      - "12783"
+    networks:
+      - sub2api-network
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "bun",
+          "-e",
+          "fetch('http://127.0.0.1:12783/health',{headers:{'x-sub2api-egress-secret':process.env.SUB2API_EGRESS_SECRET}}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   # ===========================================================================
   # PostgreSQL Database

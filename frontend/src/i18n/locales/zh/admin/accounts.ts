@@ -647,6 +647,9 @@ export default {
         wsMode: 'WS mode',
         wsModeDesc:
           '仅对当前 OpenAI 账号类型生效；包括 http_bridge 在内的账号 WS mode 仅在全局 gateway.openai_ws.mode_router_v2_enabled=true 时生效。',
+        httpToWS: 'Responses HTTP 转 WebSocket',
+        httpToWSDesc:
+          '仅 OAuth。明确允许该账号把可安全重放的 HTTP /v1/responses 请求改走上游 WebSocket；还必须同时开启全局 http_to_ws_enabled 和 WS v2。',
         wsModeOff: '关闭（off）',
         wsModeCtxPool: '上下文池（ctx_pool）',
         wsModePassthrough: '透传（passthrough）',
@@ -691,10 +694,10 @@ export default {
         codexCLIOnlyAppServer: '允许 Codex app-server 客户端',
         codexCLIOnlyAppServerDesc: '仅在上方开关开启时生效。开启后本账号额外放行内嵌 Codex 引擎、经 app-server 协议接入的第三方客户端（如 Claude Code 的 codex 插件），仍需通过全局引擎指纹门；与全局 app-server 开关取 OR（任一开即放行）。',
         codexFingerprintMode: 'Codex 指纹收敛',
-        codexFingerprintModeDesc: '多人共享同一 OAuth 账号时，将各用户的设备/会话标识收敛为账号级恒定值，减少上游可见的设备数和会话数。默认关闭（原样透传客户端标识），需要时再显式开启；部分账号开启收敛后出现过额度缩水，请按自己的实测结果选择。',
+        codexFingerprintModeDesc: '多人共享同一 OAuth 账号时，按账号隔离设备、会话和线程标识。设备模式保留原会话/线程数量，但使用账号 seed 一对一稳定映射，避免跨账号混合。默认关闭；部分账号开启后出现过额度缩水，请按自己的实测结果选择。',
         codexFingerprintOff: '关闭（透传，默认）',
-        codexFingerprintDevice: '仅设备',
-        codexFingerprintSession: '设备+会话',
+        codexFingerprintDevice: '设备隔离（会话/线程一对一映射）',
+        codexFingerprintSession: '设备+单会话（线程隔离）',
         codexFingerprintFull: '完全收敛',
         codexImageTool: 'Codex 图片桥接策略',
         codexImageToolDesc:

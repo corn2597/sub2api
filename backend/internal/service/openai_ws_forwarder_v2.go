@@ -366,6 +366,9 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		mappedModelBytes = []byte(mappedModel)
 	}
 	bufferedStreamEvents := make([][]byte, 0, 4)
+	bufferedStreamEventBytes := int64(0)
+	semanticOutputSeen := false
+	requestScopedTransient := false
 	eventCount := 0
 	tokenEventCount := 0
 	terminalEventCount := 0
@@ -437,6 +440,7 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 			emitStreamMessage(buffered, false)
 		}
 		bufferedStreamEvents = bufferedStreamEvents[:0]
+		bufferedStreamEventBytes = 0
 		flushStreamWriter(true)
 		flushedBufferedEventCount += flushed
 		if debugEnabled {
@@ -584,6 +588,12 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 			parseOpenAIWSResponseUsageFromCompletedEvent(message, usage)
 		}
 		imageCounter.AddSSEData(message)
+		startsSemanticOutput := openAIStreamDataStartsClientOutput(string(message), eventType)
+		capacityShed := (eventType == "error" || eventType == "response.failed") && isOpenAIUpstreamCapacityShedEvent(message)
+		if capacityShed {
+			requestScopedTransient = true
+			lease.MarkBroken()
+		}
 
 		if eventType == "response.failed" {
 			if hit, code, msg := detectOpenAICyberPolicy(message); hit {
@@ -599,7 +609,9 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		}
 
 		if eventType == "error" {
-			s.handleOpenAIWSErrorEventTransientFailure(ctx, account, mappedModel, lease.HandshakeHeaders(), message)
+			if !capacityShed {
+				s.handleOpenAIWSErrorEventTransientFailure(ctx, account, mappedModel, lease.HandshakeHeaders(), message)
+			}
 			errCodeRaw, errTypeRaw, errMsgRaw := parseOpenAIWSErrorEventFields(message)
 			s.persistOpenAIWSRateLimitSignal(ctx, account, lease.HandshakeHeaders(), message, errCodeRaw, errTypeRaw, errMsgRaw)
 			errMsg := strings.TrimSpace(errMsgRaw)
@@ -647,6 +659,24 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 			}
 			// error 事件后连接不再可复用，避免回池后污染下一请求。
 			lease.MarkBroken()
+			if capacityShed && !wroteDownstream && !semanticOutputSeen {
+				return nil, s.newOpenAIStreamFailoverError(c, account, false, lease.HandshakeHeaders().Get("x-request-id"), message, errMsg, lease.HandshakeHeaders())
+			}
+			if capacityShed && wroteDownstream {
+				if sanitized, changed := sanitizeOpenAICapacityShedErrorCodeForClient(message); changed {
+					message = sanitized
+				}
+				if reqStream && !clientDisconnected {
+					flushBufferedStreamEvents("capacity_error_event")
+					emitStreamMessage(message, true)
+				}
+				failoverErr := s.newOpenAIStreamFailoverError(c, account, false, lease.HandshakeHeaders().Get("x-request-id"), message, errMsg, lease.HandshakeHeaders())
+				failoverErr.RequestScopedTransient = true
+				failoverErr.ClientResponseWritten = true
+				failoverErr.NextAccountAction = NextAccountStop
+				failoverErr.UpstreamEventBody = append([]byte(nil), message...)
+				return nil, failoverErr
+			}
 			if !wroteDownstream && canFallback {
 				return nil, wrapOpenAIWSFallback(fallbackReason, errors.New(errMsg))
 			}
@@ -667,14 +697,38 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 			return nil, fmt.Errorf("openai ws error event: %s", errMsg)
 		}
 
+		if capacityShed && eventType == "response.failed" {
+			if sanitized, changed := sanitizeOpenAICapacityShedErrorCodeForClient(message); changed {
+				message = sanitized
+			}
+			if !reqStream {
+				errMsg := strings.TrimSpace(extractOpenAISSEErrorMessage(message))
+				if errMsg == "" {
+					errMsg = "OpenAI response failed"
+				}
+				failoverErr := s.newOpenAIStreamFailoverError(c, account, false, lease.HandshakeHeaders().Get("x-request-id"), message, errMsg, lease.HandshakeHeaders())
+				failoverErr.RequestScopedTransient = true
+				failoverErr.ClientResponseWritten = true
+				failoverErr.NextAccountAction = NextAccountStop
+				failoverErr.UpstreamEventBody = append([]byte(nil), message...)
+				c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"type": "server_error", "code": "server_error", "message": errMsg}})
+				return nil, failoverErr
+			}
+		}
 		if reqStream {
 			// 在首个 token 前先缓冲事件（如 response.created），
 			// 以便上游早期断连时仍可安全回退到 HTTP，不给下游发送半截流。
-			shouldBuffer := firstTokenMs == nil && !isTokenEvent && !isTerminalEvent
+			shouldBuffer := !semanticOutputSeen && !startsSemanticOutput && !isTerminalEvent
 			if shouldBuffer {
-				buffered := make([]byte, len(message))
-				copy(buffered, message)
-				bufferedStreamEvents = append(bufferedStreamEvents, buffered)
+				buffered := append([]byte(nil), message...)
+				if bufferedStreamEventBytes+int64(len(buffered)) > openAIFirstOutputStageMaxBytes {
+					semanticOutputSeen = true
+					flushBufferedStreamEvents("stage_overflow")
+					emitStreamMessage(message, true)
+				} else {
+					bufferedStreamEvents = append(bufferedStreamEvents, buffered)
+					bufferedStreamEventBytes += int64(len(buffered))
+				}
 				bufferedEventCount++
 				if debugEnabled && shouldLogOpenAIWSBufferedEvent(bufferedEventCount) {
 					logOpenAIWSModeDebug(
@@ -688,6 +742,9 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 					)
 				}
 			} else {
+				if startsSemanticOutput && eventType != "error" && eventType != "response.failed" {
+					semanticOutputSeen = true
+				}
 				flushBufferedStreamEvents(eventType)
 				emitStreamMessage(message, isTerminalEvent)
 			}
@@ -701,7 +758,11 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 			if !clientDisconnected {
 				markOpenAIWSClientVisibleFailure(c, eventType, message)
 			}
-			upstreamTerminalEvent = s.handleOpenAIWSTerminalTransientFailure(ctx, account, mappedModel, lease.HandshakeHeaders(), message)
+			if capacityShed {
+				upstreamTerminalEvent = normalizeOpenAIWSTerminalEvent(eventType)
+			} else {
+				upstreamTerminalEvent = s.handleOpenAIWSTerminalTransientFailure(ctx, account, mappedModel, lease.HandshakeHeaders(), message)
+			}
 			// A terminal event must be the final JSON document in its WS message.
 			// Ignore any tail for the completed client turn, but never reuse the
 			// ambiguous upstream connection for another request.
@@ -787,6 +848,7 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		Stream:                        reqStream,
 		OpenAIWSMode:                  true,
 		UpstreamTerminalEvent:         upstreamTerminalEvent,
+		RequestScopedTransient:        requestScopedTransient,
 		ResponseHeaders:               lease.HandshakeHeaders(),
 		Duration:                      time.Since(startTime),
 		FirstTokenMs:                  firstTokenMs,

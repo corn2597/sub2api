@@ -31,6 +31,20 @@ type httpUpstreamSequenceRecorder struct {
 	callCount int
 }
 
+type openAIWSURLOverrideDialer struct {
+	target   string
+	delegate openAIWSClientDialer
+}
+
+func (d *openAIWSURLOverrideDialer) Dial(
+	ctx context.Context,
+	_ string,
+	headers http.Header,
+	proxyURL string,
+) (openAIWSClientConn, int, http.Header, error) {
+	return d.delegate.Dial(ctx, d.target, headers, proxyURL)
+}
+
 func (u *httpUpstreamSequenceRecorder) Do(req *http.Request, proxyURL string, accountID int64, accountConcurrency int) (*http.Response, error) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
@@ -183,7 +197,264 @@ func TestOpenAIGatewayService_Forward_HTTPIngressStaysHTTPWhenWSEnabled(t *testi
 	decision, _ := c.Get("openai_ws_transport_decision")
 	reason, _ := c.Get("openai_ws_transport_reason")
 	require.Equal(t, string(OpenAIUpstreamTransportHTTPSSE), decision)
-	require.Equal(t, "client_protocol_http", reason)
+	require.Equal(t, "http_to_ws_global_disabled", reason)
+}
+
+func TestOpenAIGatewayService_Forward_HTTPIngressUsesWSWhenDoubleOptedIn(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	upstreamPayloadCh := make(chan map[string]any, 1)
+	upstreamHeadersCh := make(chan http.Header, 1)
+	wsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		upstreamHeadersCh <- r.Header.Clone()
+		var payload map[string]any
+		if err := conn.ReadJSON(&payload); err != nil {
+			return
+		}
+		upstreamPayloadCh <- payload
+		_ = conn.WriteJSON(map[string]any{
+			"type": "response.completed",
+			"response": map[string]any{
+				"id":    "resp_http_to_ws_ok",
+				"model": "gpt-5.1",
+				"output": []any{
+					map[string]any{"type": "message", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": "ok"}}},
+				},
+				"usage": map[string]any{"input_tokens": 1, "output_tokens": 1},
+			},
+		})
+	}))
+	defer wsServer.Close()
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	c.Request.Header.Set("User-Agent", "codex_cli_rs/0.144.1")
+	c.Request.Header.Set("originator", "codex_cli_rs")
+	c.Request.Header.Set("session-id", "http-client-session")
+	c.Request.Header.Set("thread-id", "http-client-thread")
+	c.Request.Header.Set("x-codex-turn-metadata", `{"installation_id":"client-install","session_id":"http-client-session","thread_id":"http-client-thread","turn_id":"client-turn","window_id":"client-window","sandbox":"seatbelt"}`)
+	SetOpenAIClientTransport(c, OpenAIClientTransportHTTP)
+
+	httpUpstream := &httpUpstreamRecorder{}
+	cfg := &config.Config{}
+	cfg.Security.URLAllowlist.Enabled = false
+	cfg.Security.URLAllowlist.AllowInsecureHTTP = true
+	cfg.Gateway.OpenAIWS.Enabled = true
+	cfg.Gateway.OpenAIWS.OAuthEnabled = true
+	cfg.Gateway.OpenAIWS.ResponsesWebsocketsV2 = true
+	cfg.Gateway.OpenAIWS.HTTPToWSEnabled = true
+	cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 1
+	cfg.Gateway.OpenAIWS.MaxIdlePerAccount = 1
+	cfg.Gateway.OpenAIWS.QueueLimitPerConn = 4
+	cfg.Gateway.OpenAIWS.DialTimeoutSeconds = 2
+	cfg.Gateway.OpenAIWS.ReadTimeoutSeconds = 2
+	cfg.Gateway.OpenAIWS.WriteTimeoutSeconds = 2
+	svc := &OpenAIGatewayService{
+		cfg:              cfg,
+		httpUpstream:     httpUpstream,
+		openaiWSResolver: NewOpenAIWSProtocolResolver(cfg),
+		toolCorrector:    NewCodexToolCorrector(),
+	}
+	pool := newOpenAIWSConnPool(cfg)
+	pool.setClientDialerForTest(&openAIWSURLOverrideDialer{
+		target:   "ws" + strings.TrimPrefix(wsServer.URL, "http"),
+		delegate: newDefaultOpenAIWSClientDialer(),
+	})
+	svc.openaiWSPool = pool
+	defer func() {
+		if svc.openaiWSPool != nil {
+			svc.openaiWSPool.Close()
+		}
+	}()
+	account := &Account{
+		ID:          104,
+		Name:        "openai-oauth-http-to-ws",
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeOAuth,
+		Status:      StatusActive,
+		Schedulable: true,
+		Concurrency: 1,
+		Credentials: map[string]any{
+			"access_token": "oauth-test-token",
+			"base_url":     wsServer.URL,
+		},
+		Extra: map[string]any{
+			"openai_oauth_responses_websockets_v2_mode":    "ctx_pool",
+			"openai_oauth_responses_websockets_v2_enabled": true,
+			"openai_oauth_http_to_ws_enabled":              true,
+			codexFingerprintModeExtraKey:                   "device",
+			codexFingerprintSeedExtraKey:                   testCodexFingerprintSeed,
+		},
+	}
+	body := []byte(`{"model":"gpt-5.1","stream":false,"store":false,"prompt_cache_key":"body-session","client_metadata":{"session_id":"body-session","thread_id":"body-thread"},"input":"hello"}`)
+	result, err := svc.Forward(context.Background(), c, account, body)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, result.OpenAIWSMode)
+	require.Equal(t, "resp_http_to_ws_ok", result.RequestID)
+	require.Nil(t, httpUpstream.lastReq, "HTTP→WS 命中后不得同时调用 HTTP upstream")
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Equal(t, "resp_http_to_ws_ok", gjson.GetBytes(recorder.Body.Bytes(), "id").String())
+
+	seed, ok := codexFingerprintSeed(account.Extra)
+	require.True(t, ok)
+	wantInstall := resolveConvergedInstallationID(account, seed)
+	wantSession := resolveConvergedSessionID(seed, "http-client-session")
+	wantThread := resolveConvergedThreadID(seed, "http-client-thread")
+
+	select {
+	case upstreamPayload := <-upstreamPayloadCh:
+		require.Equal(t, false, upstreamPayload["store"])
+		require.NotEmpty(t, upstreamPayload["model"])
+		require.Equal(t, wantSession, upstreamPayload["prompt_cache_key"])
+		metadata, metadataOK := upstreamPayload["client_metadata"].(map[string]any)
+		require.True(t, metadataOK)
+		require.Equal(t, wantInstall, metadata["x-codex-installation-id"])
+		require.Equal(t, wantSession, metadata["session_id"])
+		require.Equal(t, wantThread, metadata["thread_id"])
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake upstream did not receive HTTP→WS response.create")
+	}
+	select {
+	case upstreamHeaders := <-upstreamHeadersCh:
+		require.Equal(t, wantInstall, upstreamHeaders.Get("x-codex-installation-id"))
+		require.Equal(t, wantSession, upstreamHeaders.Get("session-id"))
+		require.Equal(t, wantSession, upstreamHeaders.Get("session_id"))
+		require.Equal(t, wantThread, upstreamHeaders.Get("thread-id"))
+		require.Equal(t, wantThread, upstreamHeaders.Get("x-client-request-id"))
+		require.Equal(t, wantThread+":0", upstreamHeaders.Get("x-codex-window-id"))
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake upstream did not receive HTTP→WS handshake")
+	}
+	require.Equal(t, "http_to_ws_enabled", c.GetString("openai_ws_transport_reason"))
+}
+
+func TestOpenAIGatewayService_Forward_HTTPIngressStreamsWSWhenDoubleOptedIn(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	upstreamPayloadCh := make(chan map[string]any, 1)
+	wsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		var payload map[string]any
+		if err := conn.ReadJSON(&payload); err != nil {
+			return
+		}
+		upstreamPayloadCh <- payload
+		events := []map[string]any{
+			{"type": "response.created", "response": map[string]any{"id": "resp_http_to_ws_stream"}},
+			{"type": "response.output_text.delta", "delta": "streamed-ok"},
+			{
+				"type": "response.completed",
+				"response": map[string]any{
+					"id":    "resp_http_to_ws_stream",
+					"model": "gpt-5.1",
+					"output": []any{
+						map[string]any{
+							"type": "message",
+							"role": "assistant",
+							"content": []any{
+								map[string]any{"type": "output_text", "text": "streamed-ok"},
+							},
+						},
+					},
+					"usage": map[string]any{"input_tokens": 1, "output_tokens": 1},
+				},
+			},
+		}
+		for _, event := range events {
+			if err := conn.WriteJSON(event); err != nil {
+				return
+			}
+		}
+	}))
+	defer wsServer.Close()
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	c.Request.Header.Set("User-Agent", "custom-client/1.0")
+	SetOpenAIClientTransport(c, OpenAIClientTransportHTTP)
+
+	httpUpstream := &httpUpstreamRecorder{}
+	cfg := &config.Config{}
+	cfg.Security.URLAllowlist.Enabled = false
+	cfg.Security.URLAllowlist.AllowInsecureHTTP = true
+	cfg.Gateway.OpenAIWS.Enabled = true
+	cfg.Gateway.OpenAIWS.OAuthEnabled = true
+	cfg.Gateway.OpenAIWS.ResponsesWebsocketsV2 = true
+	cfg.Gateway.OpenAIWS.HTTPToWSEnabled = true
+	cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 1
+	cfg.Gateway.OpenAIWS.MaxIdlePerAccount = 1
+	cfg.Gateway.OpenAIWS.QueueLimitPerConn = 4
+	cfg.Gateway.OpenAIWS.DialTimeoutSeconds = 2
+	cfg.Gateway.OpenAIWS.ReadTimeoutSeconds = 2
+	cfg.Gateway.OpenAIWS.WriteTimeoutSeconds = 2
+	svc := &OpenAIGatewayService{
+		cfg:              cfg,
+		httpUpstream:     httpUpstream,
+		openaiWSResolver: NewOpenAIWSProtocolResolver(cfg),
+		toolCorrector:    NewCodexToolCorrector(),
+	}
+	pool := newOpenAIWSConnPool(cfg)
+	pool.setClientDialerForTest(&openAIWSURLOverrideDialer{
+		target:   "ws" + strings.TrimPrefix(wsServer.URL, "http"),
+		delegate: newDefaultOpenAIWSClientDialer(),
+	})
+	svc.openaiWSPool = pool
+	defer func() {
+		if svc.openaiWSPool != nil {
+			svc.openaiWSPool.Close()
+		}
+	}()
+	account := &Account{
+		ID:          105,
+		Name:        "openai-oauth-http-to-ws-stream",
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeOAuth,
+		Status:      StatusActive,
+		Schedulable: true,
+		Concurrency: 1,
+		Credentials: map[string]any{
+			"access_token": "oauth-test-token",
+			"base_url":     wsServer.URL,
+		},
+		Extra: map[string]any{
+			"openai_oauth_responses_websockets_v2_mode":    "ctx_pool",
+			"openai_oauth_responses_websockets_v2_enabled": true,
+			"openai_oauth_http_to_ws_enabled":              true,
+		},
+	}
+	body := []byte(`{"model":"gpt-5.1","stream":true,"store":false,"input":"hello"}`)
+	result, err := svc.Forward(context.Background(), c, account, body)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, result.OpenAIWSMode)
+	require.True(t, result.Stream)
+	require.Equal(t, "resp_http_to_ws_stream", result.RequestID)
+	require.Nil(t, httpUpstream.lastReq, "HTTP→WS streaming 命中后不得同时调用 HTTP upstream")
+	streamBody := recorder.Body.String()
+	require.Contains(t, streamBody, `"type":"response.output_text.delta"`)
+	require.Contains(t, streamBody, "streamed-ok")
+	require.Contains(t, streamBody, `"type":"response.completed"`)
+
+	select {
+	case upstreamPayload := <-upstreamPayloadCh:
+		require.Equal(t, true, upstreamPayload["stream"])
+		require.Equal(t, false, upstreamPayload["store"])
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake upstream did not receive streaming HTTP→WS response.create")
+	}
+	require.Equal(t, "http_to_ws_enabled", c.GetString("openai_ws_transport_reason"))
 }
 
 func TestOpenAIGatewayService_Forward_HTTPIngressRetriesInvalidEncryptedContentOnce(t *testing.T) {
@@ -269,7 +540,7 @@ func TestOpenAIGatewayService_Forward_HTTPIngressRetriesInvalidEncryptedContentO
 	decision, _ := c.Get("openai_ws_transport_decision")
 	reason, _ := c.Get("openai_ws_transport_reason")
 	require.Equal(t, string(OpenAIUpstreamTransportHTTPSSE), decision)
-	require.Equal(t, "client_protocol_http", reason)
+	require.Equal(t, "http_to_ws_global_disabled", reason)
 }
 
 func TestOpenAIGatewayService_Forward_HTTPIngressRetriesWrappedInvalidEncryptedContentOnce(t *testing.T) {
@@ -353,7 +624,7 @@ func TestOpenAIGatewayService_Forward_HTTPIngressRetriesWrappedInvalidEncryptedC
 	decision, _ := c.Get("openai_ws_transport_decision")
 	reason, _ := c.Get("openai_ws_transport_reason")
 	require.Equal(t, string(OpenAIUpstreamTransportHTTPSSE), decision)
-	require.Equal(t, "client_protocol_http", reason)
+	require.Equal(t, "http_to_ws_global_disabled", reason)
 }
 
 func TestOpenAIGatewayService_Forward_APIKeyHTTPPreservesPreviousResponseIDWhenWSDisabled(t *testing.T) {

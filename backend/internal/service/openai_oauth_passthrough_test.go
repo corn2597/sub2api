@@ -1971,7 +1971,7 @@ func TestOpenAIGatewayService_CodexFingerprintHTTPTransformedHeaderBodyParityAnd
 		httpUpstream:  upstream,
 		toolCorrector: NewCodexToolCorrector(),
 	}
-	account := newTestOAuthAccount(4401, map[string]any{codexFingerprintModeExtraKey: "session"})
+	account := newTestOAuthAccount(4401, map[string]any{codexFingerprintModeExtraKey: "device"})
 	account.Name = "oauth-transformed"
 	account.Status = StatusActive
 	account.Schedulable = true
@@ -1985,8 +1985,8 @@ func TestOpenAIGatewayService_CodexFingerprintHTTPTransformedHeaderBodyParityAnd
 	seed, ok := codexFingerprintSeed(account.Extra)
 	require.True(t, ok)
 	wantInstall := resolveConvergedInstallationID(account, seed)
-	wantSession := resolveConvergedSessionID(seed)
-	wantThread := resolveConvergedThreadID(seed, "header-session")
+	wantSession := resolveConvergedSessionID(seed, "header-session")
+	wantThread := resolveConvergedThreadID(seed, "header-thread")
 
 	require.Equal(t, wantInstall, upstream.lastReq.Header.Get("x-codex-installation-id"))
 	require.Equal(t, wantSession, upstream.lastReq.Header.Get("session-id"))
@@ -2031,7 +2031,7 @@ func TestOpenAIGatewayService_CodexFingerprintHTTPRawPassthroughHeaderBodyParity
 		httpUpstream: upstream,
 	}
 	account := newTestOAuthAccount(4402, map[string]any{
-		codexFingerprintModeExtraKey: "session",
+		codexFingerprintModeExtraKey: "device",
 		"openai_oauth_passthrough":   true,
 	})
 	account.Name = "oauth-raw"
@@ -2047,8 +2047,8 @@ func TestOpenAIGatewayService_CodexFingerprintHTTPRawPassthroughHeaderBodyParity
 	seed, ok := codexFingerprintSeed(account.Extra)
 	require.True(t, ok)
 	wantInstall := resolveConvergedInstallationID(account, seed)
-	wantSession := resolveConvergedSessionID(seed)
-	wantThread := resolveConvergedThreadID(seed, "header-session")
+	wantSession := resolveConvergedSessionID(seed, "header-session")
+	wantThread := resolveConvergedThreadID(seed, "header-thread")
 
 	require.Equal(t, wantInstall, upstream.lastReq.Header.Get("x-codex-installation-id"))
 	require.Equal(t, wantSession, upstream.lastReq.Header.Get("session-id"))
@@ -2107,7 +2107,7 @@ func TestOpenAIGatewayService_CodexFingerprintCompactDoesNotRewriteBodyCacheKeyO
 
 	seed, ok := codexFingerprintSeed(account.Extra)
 	require.True(t, ok)
-	require.NotEqual(t, resolveConvergedSessionID(seed), gjson.GetBytes(upstream.lastBody, "prompt_cache_key").String())
+	require.NotEqual(t, resolveConvergedSessionID(seed, "body-session"), gjson.GetBytes(upstream.lastBody, "prompt_cache_key").String())
 	require.Equal(t, "body-session", gjson.GetBytes(upstream.lastBody, "prompt_cache_key").String())
 	require.Equal(t, "body-session", gjson.GetBytes(upstream.lastBody, "client_metadata.session_id").String())
 	require.False(t, gjson.GetBytes(upstream.lastBody, "client_metadata.x-codex-installation-id").Exists())
@@ -2135,7 +2135,7 @@ func TestOpenAIGatewayService_CodexFingerprintMessagesBridgeDoesNotInjectBodyPro
 		httpUpstream:  upstream,
 		toolCorrector: NewCodexToolCorrector(),
 	}
-	account := newTestOAuthAccount(4404, map[string]any{codexFingerprintModeExtraKey: "session"})
+	account := newTestOAuthAccount(4404, map[string]any{codexFingerprintModeExtraKey: "device"})
 	account.Name = "oauth-messages-bridge"
 	account.Status = StatusActive
 	account.Schedulable = true
@@ -2148,7 +2148,7 @@ func TestOpenAIGatewayService_CodexFingerprintMessagesBridgeDoesNotInjectBodyPro
 
 	seed, ok := codexFingerprintSeed(account.Extra)
 	require.True(t, ok)
-	wantSession := resolveConvergedSessionID(seed)
+	wantSession := resolveConvergedSessionID(seed, "header-session")
 	require.False(t, gjson.GetBytes(upstream.lastBody, "prompt_cache_key").Exists())
 	require.Equal(t, wantSession, gjson.GetBytes(upstream.lastBody, "client_metadata.session_id").String())
 	require.Equal(t, wantSession, upstream.lastReq.Header.Get("session_id"))

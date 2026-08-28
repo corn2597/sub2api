@@ -2172,6 +2172,16 @@ func (a *Account) IsOpenAIWSForceHTTPEnabled() bool {
 	return ok && enabled
 }
 
+// IsOpenAIOAuthHTTPToWSEnabled 返回 OAuth 账号是否明确允许 HTTP Responses 使用 WS 上游。
+// 字段：accounts.extra.openai_oauth_http_to_ws_enabled。缺省或类型不正确时关闭。
+func (a *Account) IsOpenAIOAuthHTTPToWSEnabled() bool {
+	if a == nil || !a.IsOpenAIOAuth() || a.Extra == nil {
+		return false
+	}
+	enabled, ok := a.Extra["openai_oauth_http_to_ws_enabled"].(bool)
+	return ok && enabled
+}
+
 // IsOpenAIResponsesFlattenNamespacesEnabled 返回账号级"摊平 Codex namespace 工具"开关。
 // 字段：accounts.extra.openai_responses_flatten_namespaces，缺省 false（原样保留）。
 //

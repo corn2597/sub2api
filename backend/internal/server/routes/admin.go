@@ -590,6 +590,10 @@ func registerSettingsRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		adminSettings.PUT("/web-search-emulation", h.Admin.Setting.UpdateWebSearchEmulationConfig)
 		adminSettings.POST("/web-search-emulation/test", h.Admin.Setting.TestWebSearchEmulation)
 		adminSettings.POST("/web-search-emulation/reset-usage", h.Admin.Setting.ResetWebSearchUsage)
+		// OpenAI Bun egress sidecar runtime switches and health check
+		adminSettings.GET("/openai-egress", h.Admin.Setting.GetOpenAIEgressSettings)
+		adminSettings.PUT("/openai-egress", h.Admin.Setting.UpdateOpenAIEgressSettings)
+		adminSettings.POST("/openai-egress/test", h.Admin.Setting.TestOpenAIEgress)
 	}
 }
 

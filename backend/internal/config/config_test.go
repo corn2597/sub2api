@@ -494,8 +494,17 @@ func TestLoadDefaultOpenAIWSConfig(t *testing.T) {
 	if cfg.Gateway.OpenAIWS.PrewarmCooldownMS != 300 {
 		t.Fatalf("Gateway.OpenAIWS.PrewarmCooldownMS = %d, want 300", cfg.Gateway.OpenAIWS.PrewarmCooldownMS)
 	}
-	if cfg.Gateway.OpenAIWS.ClientReadLimitBytes != 64*1024*1024 {
-		t.Fatalf("Gateway.OpenAIWS.ClientReadLimitBytes = %d, want %d", cfg.Gateway.OpenAIWS.ClientReadLimitBytes, 64*1024*1024)
+	if cfg.Gateway.OpenAIWS.ClientReadLimitBytes != 256*1024*1024 {
+		t.Fatalf("Gateway.OpenAIWS.ClientReadLimitBytes = %d, want %d", cfg.Gateway.OpenAIWS.ClientReadLimitBytes, 256*1024*1024)
+	}
+	if cfg.Gateway.OpenAIWS.EgressMessageLimitBytes != 256*1024*1024 {
+		t.Fatalf("Gateway.OpenAIWS.EgressMessageLimitBytes = %d, want %d", cfg.Gateway.OpenAIWS.EgressMessageLimitBytes, 256*1024*1024)
+	}
+	if cfg.Gateway.OpenAIWS.LargeMessageThresholdBytes != 32*1024*1024 {
+		t.Fatalf("Gateway.OpenAIWS.LargeMessageThresholdBytes = %d, want %d", cfg.Gateway.OpenAIWS.LargeMessageThresholdBytes, 32*1024*1024)
+	}
+	if cfg.Gateway.OpenAIWS.LargeMessageMaxInflight != 1 {
+		t.Fatalf("Gateway.OpenAIWS.LargeMessageMaxInflight = %d, want 1", cfg.Gateway.OpenAIWS.LargeMessageMaxInflight)
 	}
 	if !cfg.Gateway.OpenAIWS.HTTPBridgeEnabled {
 		t.Fatalf("Gateway.OpenAIWS.HTTPBridgeEnabled = false, want true")
@@ -2425,6 +2434,19 @@ func TestValidateConfig_OpenAIWSRules(t *testing.T) {
 
 		require.NoError(t, cfg.Validate())
 	})
+}
+
+func TestValidateConfig_OpenAIEgressRequiresSharedSecret(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	cfg, err := Load()
+	require.NoError(t, err)
+
+	cfg.Gateway.OpenAIEgress.Enabled = true
+	cfg.Gateway.OpenAIEgress.BaseURL = "http://127.0.0.1:12783"
+	cfg.Gateway.OpenAIEgress.SharedSecret = ""
+
+	err = cfg.Validate()
+	require.ErrorContains(t, err, "gateway.openai_egress.shared_secret")
 }
 
 func TestValidateConfig_AutoScaleDisabledIgnoreAutoScaleFields(t *testing.T) {

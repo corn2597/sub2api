@@ -1648,7 +1648,7 @@ func (s *OpenAIGatewayService) fetchCodexModelsManifestUpstream(ctx context.Cont
 	}
 
 	var resp *http.Response
-	if request.useAPIKeyUpstream {
+	if request.useAPIKeyUpstream || isOfficialOpenAICodexModelsTarget(req.URL) {
 		if s.httpUpstream == nil {
 			return nil, infraerrors.New(http.StatusInternalServerError, "OPENAI_CODEX_MODELS_UPSTREAM_NOT_CONFIGURED", "Codex models upstream HTTP client is not configured")
 		}
@@ -1774,6 +1774,15 @@ func (s *OpenAIGatewayService) fetchCodexModelsManifestUpstream(ctx context.Cont
 		}
 	}
 	return manifest, nil
+}
+
+func isOfficialOpenAICodexModelsTarget(target *url.URL) bool {
+	if target == nil || !strings.EqualFold(target.Scheme, "https") {
+		return false
+	}
+	host := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(target.Hostname()), "."))
+	return host == "openai.com" || strings.HasSuffix(host, ".openai.com") ||
+		host == "chatgpt.com" || strings.HasSuffix(host, ".chatgpt.com")
 }
 
 func codexModelsManifestBodyETag(body []byte) string {

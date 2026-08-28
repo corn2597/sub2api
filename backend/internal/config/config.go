@@ -104,6 +104,10 @@ type Config struct {
 	BatchImage              BatchImageConfig              `mapstructure:"batch_image"`
 	ImageStorage            ImageStorageConfig            `mapstructure:"image_storage"`
 	Plugins                 PluginConfig                  `mapstructure:"plugins"`
+	// openAIEgressSnapshot is the runtime-published copy used by OpenAI egress
+	// hot paths. Keep the YAML-facing field above unchanged; the atomic pointer
+	// prevents admin runtime switches from racing request readers.
+	openAIEgressSnapshot atomic.Pointer[OpenAIEgressConfig]
 }
 
 // PluginConfig 控制管理员手动上传的本地进程插件。
@@ -937,6 +941,21 @@ type ImageConcurrencyConfig struct {
 	MaxWaitingRequests int `mapstructure:"max_waiting_requests"`
 }
 
+// OpenAIEgressConfig controls the Bun/OpenCode sidecar used for every
+// OpenAI/ChatGPT outbound hop. When enabled, each selected protocol is
+// fail-closed unless FallbackToDirect is explicitly set for emergency rollback.
+type OpenAIEgressConfig struct {
+	Enabled               bool   `mapstructure:"enabled"`
+	BaseURL               string `mapstructure:"base_url"`
+	SharedSecret          string `mapstructure:"shared_secret"`
+	ControlTimeoutSeconds int    `mapstructure:"control_timeout_seconds"`
+	FallbackToDirect      bool   `mapstructure:"fallback_to_direct"`
+	HTTPEnabled           bool   `mapstructure:"http_enabled"`
+	WSEnabled             bool   `mapstructure:"ws_enabled"`
+	OAuthEnabled          bool   `mapstructure:"oauth_enabled"`
+	AllowProxy            bool   `mapstructure:"allow_proxy"`
+}
+
 const (
 	ImageConcurrencyOverflowModeReject = "reject"
 	ImageConcurrencyOverflowModeWait   = "wait"
@@ -1010,6 +1029,8 @@ type GatewayConfig struct {
 	OpenAIScheduler GatewayOpenAISchedulerConfig `mapstructure:"openai_scheduler"`
 	// OpenAIHTTP2: OpenAI HTTP 上游协议策略（默认启用 HTTP/2，可按代理能力回退 HTTP/1.1）
 	OpenAIHTTP2 GatewayOpenAIHTTP2Config `mapstructure:"openai_http2"`
+	// OpenAIEgress: OpenAI/ChatGPT HTTP, WebSocket and OAuth outbound sidecar.
+	OpenAIEgress OpenAIEgressConfig `mapstructure:"openai_egress"`
 	// OpenAIProxyStreamCircuit: Responses SSE 代理断流熔断策略。
 	OpenAIProxyStreamCircuit GatewayOpenAIProxyStreamCircuitConfig `mapstructure:"openai_proxy_stream_circuit"`
 	// ImageConcurrency: 图片生成独立并发限制配置（默认关闭）
@@ -1243,6 +1264,8 @@ type GatewayOpenAIWSConfig struct {
 	APIKeyEnabled bool `mapstructure:"apikey_enabled"`
 	// ForceHTTP: 全局强制 HTTP（用于紧急回滚）
 	ForceHTTP bool `mapstructure:"force_http"`
+	// HTTPToWSEnabled: 允许符合条件的 HTTP /v1/responses 请求使用 WSv2 上游（默认 false）
+	HTTPToWSEnabled bool `mapstructure:"http_to_ws_enabled"`
 	// AllowStoreRecovery: 允许在 WSv2 下按策略恢复 store=true（默认 false）
 	AllowStoreRecovery bool `mapstructure:"allow_store_recovery"`
 	// IngressPreviousResponseRecoveryEnabled: ingress 模式收到 previous_response_not_found 时，是否允许自动去掉 previous_response_id 重试一次（默认 true）
@@ -1257,8 +1280,14 @@ type GatewayOpenAIWSConfig struct {
 	StoreDisabledForceNewConn bool `mapstructure:"store_disabled_force_new_conn"`
 	// PrewarmGenerateEnabled: 是否启用 WSv2 generate=false 预热（默认 false）
 	PrewarmGenerateEnabled bool `mapstructure:"prewarm_generate_enabled"`
-	// ClientReadLimitBytes: 入站客户端 WS 单帧读取上限。
+	// ClientReadLimitBytes: 入站客户端解压后完整 WS message 读取上限。
 	ClientReadLimitBytes int64 `mapstructure:"client_read_limit_bytes"`
+	// EgressMessageLimitBytes: HTTP2WS 业务 payload 上限；WS wire limit 会额外预留协议 envelope headroom。
+	EgressMessageLimitBytes int64 `mapstructure:"egress_message_limit_bytes"`
+	// LargeMessageThresholdBytes: 超过该值的 HTTP2WS message 使用大消息准入。
+	LargeMessageThresholdBytes int64 `mapstructure:"large_message_threshold_bytes"`
+	// LargeMessageMaxInflight: 每进程允许同时发送的大消息数。
+	LargeMessageMaxInflight int `mapstructure:"large_message_max_inflight"`
 	// HTTPBridgeEnabled: 首包过大时，保持客户端 WS，改用 HTTP Responses 上游。
 	HTTPBridgeEnabled bool `mapstructure:"http_bridge_enabled"`
 	// HTTPBridgeThresholdBytes: 触发 HTTP bridge 的入站 WS payload 阈值。
@@ -2382,12 +2411,16 @@ func setDefaults() {
 	viper.SetDefault("gateway.openai_ws.oauth_enabled", true)
 	viper.SetDefault("gateway.openai_ws.apikey_enabled", true)
 	viper.SetDefault("gateway.openai_ws.force_http", false)
+	viper.SetDefault("gateway.openai_ws.http_to_ws_enabled", false)
 	viper.SetDefault("gateway.openai_ws.allow_store_recovery", false)
 	viper.SetDefault("gateway.openai_ws.ingress_previous_response_recovery_enabled", true)
 	viper.SetDefault("gateway.openai_ws.store_disabled_conn_mode", "strict")
 	viper.SetDefault("gateway.openai_ws.store_disabled_force_new_conn", true)
 	viper.SetDefault("gateway.openai_ws.prewarm_generate_enabled", false)
-	viper.SetDefault("gateway.openai_ws.client_read_limit_bytes", 64*1024*1024)
+	viper.SetDefault("gateway.openai_ws.client_read_limit_bytes", int64(256*1024*1024))
+	viper.SetDefault("gateway.openai_ws.egress_message_limit_bytes", int64(256*1024*1024))
+	viper.SetDefault("gateway.openai_ws.large_message_threshold_bytes", int64(32*1024*1024))
+	viper.SetDefault("gateway.openai_ws.large_message_max_inflight", 1)
 	viper.SetDefault("gateway.openai_ws.http_bridge_enabled", true)
 	viper.SetDefault("gateway.openai_ws.http_bridge_threshold_bytes", 15*1024*1024)
 	viper.SetDefault("gateway.openai_ws.responses_websockets", false)
@@ -2429,6 +2462,17 @@ func setDefaults() {
 	viper.SetDefault("gateway.openai_ws.scheduler_score_weights.upstream_cost", 0.0)
 	viper.SetDefault("gateway.openai_ws.scheduler_score_weights.previous_response", 5.0)
 	viper.SetDefault("gateway.openai_ws.scheduler_score_weights.session_sticky", 3.0)
+	// OpenCode egress is opt-in at the process level, but all enabled legs fail
+	// closed by default. Deployment config enables all legs together.
+	viper.SetDefault("gateway.openai_egress.enabled", false)
+	viper.SetDefault("gateway.openai_egress.base_url", "http://127.0.0.1:12783")
+	viper.SetDefault("gateway.openai_egress.shared_secret", "")
+	viper.SetDefault("gateway.openai_egress.control_timeout_seconds", 120)
+	viper.SetDefault("gateway.openai_egress.fallback_to_direct", false)
+	viper.SetDefault("gateway.openai_egress.http_enabled", true)
+	viper.SetDefault("gateway.openai_egress.ws_enabled", true)
+	viper.SetDefault("gateway.openai_egress.oauth_enabled", true)
+	viper.SetDefault("gateway.openai_egress.allow_proxy", true)
 	// OpenAI HTTP upstream protocol strategy
 	viper.SetDefault("gateway.openai_http2.enabled", true)
 	viper.SetDefault("gateway.openai_http2.allow_proxy_fallback_to_http1", true)
@@ -3441,6 +3485,15 @@ func (c *Config) Validate() error {
 	if c.Gateway.OpenAIWS.ClientReadLimitBytes <= 0 {
 		return fmt.Errorf("gateway.openai_ws.client_read_limit_bytes must be positive")
 	}
+	if c.Gateway.OpenAIWS.EgressMessageLimitBytes <= 0 {
+		return fmt.Errorf("gateway.openai_ws.egress_message_limit_bytes must be positive")
+	}
+	if c.Gateway.OpenAIWS.LargeMessageThresholdBytes <= 0 || c.Gateway.OpenAIWS.LargeMessageThresholdBytes > c.Gateway.OpenAIWS.EgressMessageLimitBytes {
+		return fmt.Errorf("gateway.openai_ws.large_message_threshold_bytes must be positive and no greater than egress_message_limit_bytes")
+	}
+	if c.Gateway.OpenAIWS.LargeMessageMaxInflight != 1 {
+		return fmt.Errorf("gateway.openai_ws.large_message_max_inflight must be 1")
+	}
 	if c.Gateway.OpenAIWS.HTTPBridgeThresholdBytes < 0 {
 		return fmt.Errorf("gateway.openai_ws.http_bridge_threshold_bytes must be non-negative")
 	}
@@ -3505,6 +3558,24 @@ func (c *Config) Validate() error {
 	}
 	if c.Gateway.OpenAIHTTP2.FallbackTTLSeconds < 0 {
 		return fmt.Errorf("gateway.openai_http2.fallback_ttl_seconds must be non-negative")
+	}
+	if egress := c.Gateway.OpenAIEgress; egress != (OpenAIEgressConfig{}) {
+		baseURL := strings.TrimSpace(egress.BaseURL)
+		if egress.Enabled && baseURL == "" {
+			return fmt.Errorf("gateway.openai_egress.base_url is required when enabled")
+		}
+		if egress.Enabled && strings.TrimSpace(egress.SharedSecret) == "" {
+			return fmt.Errorf("gateway.openai_egress.shared_secret is required when enabled")
+		}
+		if baseURL != "" {
+			parsed, err := url.Parse(baseURL)
+			if err != nil || parsed.Scheme == "" || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+				return fmt.Errorf("gateway.openai_egress.base_url must be an http(s) URL")
+			}
+		}
+		if egress.ControlTimeoutSeconds < 0 || egress.ControlTimeoutSeconds > 900 {
+			return fmt.Errorf("gateway.openai_egress.control_timeout_seconds must be within [0,900]")
+		}
 	}
 	if c.Gateway.OpenAIProxyStreamCircuit.FailureThreshold < 0 {
 		return fmt.Errorf("gateway.openai_proxy_stream_circuit.failure_threshold must be non-negative")

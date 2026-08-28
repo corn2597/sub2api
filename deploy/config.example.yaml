@@ -335,6 +335,8 @@ gateway:
     # 全局强制 OpenAI Responses 上游使用 HTTP/SSE，不使用 WebSocket（紧急回滚开关）。
     # 此开关不强制 HTTP/1.1；HTTP/2 由 gateway.openai_http2 单独控制。
     force_http: false
+    # HTTP /v1/responses -> upstream Responses WebSocket（默认关闭；账号还需单独 opt-in）
+    http_to_ws_enabled: false
     # 允许在 WSv2 下按策略恢复 store=true（默认 false）
     allow_store_recovery: false
     # ingress 模式收到 previous_response_not_found 时，自动去掉 previous_response_id 重试一次（默认 true）
@@ -347,6 +349,13 @@ gateway:
     store_disabled_force_new_conn: true
     # 是否启用 WSv2 generate=false 预热（默认 false）
     prewarm_generate_enabled: false
+    # 解压后的完整客户端 WS message 上限：256 MiB
+    client_read_limit_bytes: 268435456
+    # HTTP2WS 业务 payload 上限：256 MiB；wire 层会额外预留 64 KiB JSON envelope
+    egress_message_limit_bytes: 268435456
+    # 大消息准入：超过 32 MiB 时，每实例只允许 1 个在途
+    large_message_threshold_bytes: 33554432
+    large_message_max_inflight: 1
     # 协议 feature 开关，v2 优先于 v1
     responses_websockets: false
     responses_websockets_v2: true
@@ -422,6 +431,20 @@ gateway:
     fallback_error_threshold: 2
     fallback_window_seconds: 60
     fallback_ttl_seconds: 600
+  # OpenAI/ChatGPT 全量出站使用 OpenCode Bun sidecar。生产部署应启用全部三条链路，
+  # sidecar 异常时 fail closed，禁止回退 Go 直连。
+  openai_egress:
+    enabled: true
+    base_url: "http://opencode-egress:12783"
+    # Set a strong secret here when using this YAML directly. Docker Compose
+    # injects the secret with GATEWAY_OPENAI_EGRESS_SHARED_SECRET instead.
+    shared_secret: "change-me"
+    control_timeout_seconds: 120
+    fallback_to_direct: false
+    http_enabled: true
+    ws_enabled: true
+    oauth_enabled: true
+    allow_proxy: true
   # OpenAI Responses SSE 代理断流熔断；按 proxy_id 跨账号隔离，仅影响下一次调度。
   # 隔离是偏好而非硬闸：当全部候选账号都在被隔离代理下时自动放行（fail-open），
   # 不会因熔断而返回"无可用账号"。3 秒内的并发断流合并为一次失败事件。
