@@ -182,13 +182,20 @@ async function proxyHTTP(request: Request) {
   assertOpenCodeFingerprint(headers)
   metrics.http++
   auditOutbound("http", targetURL, headers, method)
-  const upstream = await fetchWithProxy(targetURL, {
-    method,
-    headers,
-    body: method === "GET" || method === "HEAD" ? undefined : request.body,
-    redirect: "manual",
-    signal: request.signal,
-  }, proxyValue(request.headers.get("x-sub2api-target-proxy")))
+  let upstream: Response
+  try {
+    upstream = await fetchWithProxy(targetURL, {
+      method,
+      headers,
+      body: method === "GET" || method === "HEAD" ? undefined : request.body,
+      redirect: "manual",
+      signal: request.signal,
+    }, proxyValue(request.headers.get("x-sub2api-target-proxy")))
+  } catch (error) {
+    auditUpstreamFailure(targetURL, error)
+    throw error
+  }
+  auditUpstreamResponse(targetURL, upstream)
   return targetResponse(upstream)
 }
 
@@ -422,6 +429,32 @@ function auditOutboundMessageIdentity(message: string | Buffer) {
     turn_hash: hashValue(identity.turnID ?? null),
     window_hash: hashValue(identity.windowID ?? null),
     embedded_consistent: identity.embeddedConsistent,
+  }))
+}
+
+function auditUpstreamResponse(targetURL: string, response: Response) {
+  if (!auditEnabled) return
+  const target = new URL(targetURL)
+  console.log(JSON.stringify({
+    event: "opencode_egress_upstream_response",
+    transport: "http",
+    host: target.host,
+    path: target.pathname,
+    status: response.status,
+    content_type: response.headers.get("content-type"),
+    request_id: response.headers.get("x-request-id"),
+  }))
+}
+
+function auditUpstreamFailure(targetURL: string, error: unknown) {
+  if (!auditEnabled) return
+  const target = new URL(targetURL)
+  console.log(JSON.stringify({
+    event: "opencode_egress_upstream_failure",
+    transport: "http",
+    host: target.host,
+    path: target.pathname,
+    error_name: error instanceof Error ? error.name : "Error",
   }))
 }
 
