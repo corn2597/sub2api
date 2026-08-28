@@ -28,6 +28,7 @@ describe("OpenCode outbound fingerprint", () => {
     expect(headers.get("x-sub2api-account-id")).toBeNull()
     expect(headers.get("x-codex-installation-id")).toBeNull()
     expect(headers.get("x-client-request-id")).toBeNull()
+    expect(headers.get("accept")).toBeNull()
     expect(headers.get("originator")).toBe("opencode")
     const userAgent = headers.get("user-agent") ?? ""
     expect(userAgent.startsWith("opencode/1.18.20 ")).toBeTrue()
@@ -35,6 +36,27 @@ describe("OpenCode outbound fingerprint", () => {
     expect(userAgent).toContain("runtime/bun/1.3.14")
     expect(userAgent.toLowerCase()).not.toContain("sub2api")
     expect(userAgent).not.toContain("Go-http-client")
+  })
+
+  test("preserves OpenAI HTTP protocol headers while replacing client identity", () => {
+    const headers = normalizeModelHeaders({
+      accept: "text/event-stream",
+      "openai-beta": "responses=experimental",
+      version: "0.146.0",
+      "x-codex-beta-features": "remote_compaction_v2",
+      "x-codex-turn-metadata": '{"turn_id":"turn-1"}',
+      "x-codex-turn-state": "state-1",
+      origin: "https://chatgpt.com",
+      referer: "https://chatgpt.com/",
+    })
+    expect(headers.get("accept")).toBe("text/event-stream")
+    expect(headers.get("openai-beta")).toBe("responses=experimental")
+    expect(headers.get("version")).toBe("0.146.0")
+    expect(headers.get("x-codex-beta-features")).toBe("remote_compaction_v2")
+    expect(headers.get("x-codex-turn-metadata")).toBe('{"turn_id":"turn-1"}')
+    expect(headers.get("x-codex-turn-state")).toBe("state-1")
+    expect(headers.get("origin")).toBeNull()
+    expect(headers.get("referer")).toBeNull()
   })
 
   test("preserves only a Go-derived stable OpenCode session", () => {

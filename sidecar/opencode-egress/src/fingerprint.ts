@@ -47,12 +47,21 @@ const hopByHopHeaders = new Set([
 ])
 
 const modelHeaders = new Set([
+  // OpenAI HTTP model protocol headers. These are request semantics rather
+  // than transport/client identity and must survive the sidecar hop for
+  // alpha search, image Responses bridging, and Responses compatibility.
+  "accept",
   "authorization",
   "chatgpt-account-id",
   "content-type",
+  "openai-beta",
   "openai-organization",
   "openai-project",
   "session-id",
+  "version",
+  "x-codex-beta-features",
+  "x-codex-turn-metadata",
+  "x-codex-turn-state",
   "x-parent-session-id",
   "x-session-affinity",
   "x-session-id",
