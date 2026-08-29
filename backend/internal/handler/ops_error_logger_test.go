@@ -125,6 +125,16 @@ func TestPrependOpsLifecycleEvents_PersistsMetadataWithoutRequestBody(t *testing
 	require.Contains(t, events[1].UpstreamResponseBody, "full upstream detail")
 }
 
+func TestLifecycleEventDetailIncludesClientAndLogicalErrorStatuses(t *testing.T) {
+	got := lifecycleEventDetail(service.OpsRequestLifecycleEvent{
+		Attempt:     1,
+		Retry:       2,
+		HTTPStatus:  http.StatusOK,
+		ErrorStatus: http.StatusBadGateway,
+	})
+	require.Equal(t, "attempt=1 retry=2 http_status=200 error_status=502", got)
+}
+
 func resetOpsErrorLoggerStateForTest(t *testing.T) {
 	t.Helper()
 

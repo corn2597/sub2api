@@ -1771,12 +1771,18 @@ func prependOpsLifecycleEvents(c *gin.Context, entry *service.OpsInsertErrorLogI
 }
 
 func lifecycleEventDetail(event service.OpsRequestLifecycleEvent) string {
-	parts := make([]string, 0, 2)
+	parts := make([]string, 0, 4)
 	if event.Attempt > 0 {
 		parts = append(parts, "attempt="+strconv.Itoa(event.Attempt))
 	}
 	if event.Retry > 0 {
 		parts = append(parts, "retry="+strconv.Itoa(event.Retry))
+	}
+	if event.HTTPStatus > 0 {
+		parts = append(parts, "http_status="+strconv.Itoa(event.HTTPStatus))
+	}
+	if event.ErrorStatus > 0 {
+		parts = append(parts, "error_status="+strconv.Itoa(event.ErrorStatus))
 	}
 	return strings.Join(parts, " ")
 }

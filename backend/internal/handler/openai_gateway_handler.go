@@ -2966,11 +2966,21 @@ func (h *OpenAIGatewayHandler) handleStreamingAwareErrorWithCode(
 	}
 	if service.PreserveFullOpsErrorDetails(c) {
 		outcome := "json_error"
+		clientHTTPStatus := status
 		if streamStarted {
 			outcome = "sse_error"
+			clientHTTPStatus = c.Writer.Status()
+			if clientHTTPStatus <= 0 {
+				clientHTTPStatus = http.StatusOK
+			}
 		}
 		service.AppendOpsRequestLifecycleEvent(c, service.OpsRequestLifecycleEvent{
-			Event: "client_response_written", Outcome: outcome, Scope: "client", Reason: strconv.Itoa(status),
+			Event:       "client_response_finalized",
+			Outcome:     outcome,
+			Scope:       "client",
+			Reason:      strconv.Itoa(clientHTTPStatus),
+			HTTPStatus:  clientHTTPStatus,
+			ErrorStatus: status,
 		})
 		service.AppendOpsRequestLifecycleEvent(c, service.OpsRequestLifecycleEvent{
 			Event: "request_completed", Outcome: "failed", Scope: "request", Reason: errType,

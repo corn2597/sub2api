@@ -424,15 +424,17 @@ type OpsUpstreamErrorEvent struct {
 // diagnostics. It is merged into upstream_errors only when the request has a
 // visible error, so successful usage rows retain their existing shape.
 type OpsRequestLifecycleEvent struct {
-	AtUnixMs  int64  `json:"at_unix_ms,omitempty"`
-	Event     string `json:"event"`
-	Outcome   string `json:"outcome,omitempty"`
-	Scope     string `json:"scope,omitempty"`
-	Reason    string `json:"reason,omitempty"`
-	AccountID int64  `json:"account_id,omitempty"`
-	ConnID    string `json:"conn_id,omitempty"`
-	Attempt   int    `json:"attempt,omitempty"`
-	Retry     int    `json:"retry,omitempty"`
+	AtUnixMs    int64  `json:"at_unix_ms,omitempty"`
+	Event       string `json:"event"`
+	Outcome     string `json:"outcome,omitempty"`
+	Scope       string `json:"scope,omitempty"`
+	Reason      string `json:"reason,omitempty"`
+	AccountID   int64  `json:"account_id,omitempty"`
+	ConnID      string `json:"conn_id,omitempty"`
+	Attempt     int    `json:"attempt,omitempty"`
+	Retry       int    `json:"retry,omitempty"`
+	HTTPStatus  int    `json:"http_status,omitempty"`
+	ErrorStatus int    `json:"error_status,omitempty"`
 }
 
 // AppendOpsRequestLifecycleEvent records a bounded, payload-free lifecycle
@@ -476,6 +478,12 @@ func AppendOpsRequestLifecycleEvent(c *gin.Context, event OpsRequestLifecycleEve
 	}
 	if event.Retry < 0 {
 		event.Retry = 0
+	}
+	if event.HTTPStatus < 0 {
+		event.HTTPStatus = 0
+	}
+	if event.ErrorStatus < 0 {
+		event.ErrorStatus = 0
 	}
 	var existing []OpsRequestLifecycleEvent
 	if value, ok := c.Get(OpsRequestLifecycleEventsKey); ok {
