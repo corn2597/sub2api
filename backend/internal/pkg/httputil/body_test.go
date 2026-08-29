@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"compress/zlib"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -114,6 +115,36 @@ func TestReadRequestBodyWithPrealloc_RejectsCorruptZstd(t *testing.T) {
 	_, err := ReadRequestBodyWithPrealloc(req)
 	if err == nil {
 		t.Fatal("expected error for corrupt zstd body, got nil")
+	}
+}
+
+func TestReadDecompressedBodyRejectsDataBeyondLimitWithoutTruncating(t *testing.T) {
+	const limit = int64(64)
+	payload := bytes.Repeat([]byte("x"), int(limit+1))
+
+	got, err := readDecompressedBody(bytes.NewReader(payload), limit)
+	if got != nil {
+		t.Fatalf("oversized decompressed body must not be returned, got %d bytes", len(got))
+	}
+	var maxErr *http.MaxBytesError
+	if !errors.As(err, &maxErr) {
+		t.Fatalf("expected MaxBytesError, got %T: %v", err, err)
+	}
+	if maxErr.Limit != limit {
+		t.Fatalf("limit mismatch: got %d want %d", maxErr.Limit, limit)
+	}
+}
+
+func TestReadDecompressedBodyAllowsExactLimit(t *testing.T) {
+	const limit = int64(64)
+	payload := bytes.Repeat([]byte("x"), int(limit))
+
+	got, err := readDecompressedBody(bytes.NewReader(payload), limit)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("body mismatch: got %d bytes want %d", len(got), len(payload))
 	}
 }
 
