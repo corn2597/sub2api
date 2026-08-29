@@ -1,4 +1,4 @@
-import UpstreamWebSocket, { type RawData } from "ws"
+import { UpstreamWebSocket, type RawData, type UpstreamWebSocket as UpstreamWebSocketInstance } from "./upstream-websocket"
 import { HttpsProxyAgent } from "https-proxy-agent"
 import { createHash } from "node:crypto"
 import {
@@ -52,7 +52,7 @@ type SocketData = {
   targetURL: string
   targetHeaders: HeaderMap
   targetProxy?: string
-  upstream?: UpstreamWebSocket
+  upstream?: UpstreamWebSocketInstance
   ready: boolean
   sending: boolean
   paused: boolean
