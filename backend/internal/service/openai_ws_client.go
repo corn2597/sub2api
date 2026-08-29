@@ -106,9 +106,8 @@ type coderOpenAIWSClientDialer struct {
 	proxyMisses   atomic.Int64
 }
 
-// openAIWSHandshakeError keeps a bounded, non-logged HTTP error body so the
-// Agent Identity recovery path can distinguish an invalid task from other
-// 401 handshake failures.
+// openAIWSHandshakeError keeps the upstream HTTP error body so recovery and
+// HTTP-to-WS lifecycle diagnostics can classify the actual handshake failure.
 type openAIWSHandshakeError struct {
 	Body []byte
 	Err  error
@@ -191,7 +190,7 @@ func (d *coderOpenAIWSClientDialer) dialDirect(
 		}
 		var body []byte
 		if resp != nil && resp.Body != nil {
-			body, _ = io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+			body, _ = io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
 		}
 		return nil, status, respHeaders, &openAIWSHandshakeError{Body: body, Err: err}
@@ -212,6 +211,7 @@ type openAIEgressWSControl struct {
 	Status     int                 `json:"status"`
 	Headers    map[string][]string `json:"headers"`
 	BodyBase64 string              `json:"body_base64"`
+	Message    string              `json:"message"`
 }
 
 func (d *coderOpenAIWSClientDialer) dialEgress(
@@ -255,7 +255,7 @@ func (d *coderOpenAIWSClientDialer) dialEgress(
 			status = resp.StatusCode
 			responseHeaders = cloneHeader(resp.Header)
 			if resp.Body != nil {
-				body, _ = io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+				body, _ = io.ReadAll(resp.Body)
 				_ = resp.Body.Close()
 			}
 		}
@@ -284,9 +284,13 @@ func (d *coderOpenAIWSClientDialer) dialEgress(
 	case "sub2api.egress.handshake_error":
 		_ = conn.CloseNow()
 		body, _ := base64.StdEncoding.DecodeString(control.BodyBase64)
+		errMessage := fmt.Sprintf("openai websocket upstream handshake failed with status %d", control.Status)
+		if message := strings.TrimSpace(control.Message); message != "" {
+			errMessage += ": " + message
+		}
 		return nil, control.Status, responseHeaders, &openAIWSHandshakeError{
 			Body: body,
-			Err:  fmt.Errorf("openai websocket upstream handshake failed with status %d", control.Status),
+			Err:  errors.New(errMessage),
 		}
 	default:
 		_ = conn.CloseNow()

@@ -1029,6 +1029,18 @@
           </p>
           <Select v-model="codexFingerprintMode" data-testid="bulk-codex-fingerprint-mode-select" :options="codexFingerprintModeOptions" />
         </div>
+        <div class="mt-3 flex items-center justify-between gap-4" :class="codexFingerprintMode !== 'device' && 'opacity-50'">
+          <label class="input-label mb-0">{{ t('admin.accounts.openai.codexFingerprintSeedCount') }}</label>
+          <input
+            v-model.number="codexFingerprintSeedCount"
+            data-testid="bulk-codex-fingerprint-seed-count"
+            type="number"
+            min="1"
+            max="16"
+            class="input w-28"
+            :disabled="!enableCodexFingerprintMode || codexFingerprintMode !== 'device'"
+          />
+        </div>
       </div>
 
       <!-- Upstream billing auto probe (any API-key platform) -->
@@ -1750,6 +1762,7 @@ const codexCLIOnlyAppServerEnabled = ref(false)
 type CodexFingerprintMode = 'off' | 'device' | 'session' | 'full'
 const enableCodexFingerprintMode = ref(false)
 const codexFingerprintMode = ref<CodexFingerprintMode>('off')
+const codexFingerprintSeedCount = ref(3)
 const codexFingerprintModeOptions = computed(() => [
   { value: 'off' as CodexFingerprintMode, label: t('admin.accounts.openai.codexFingerprintOff') },
   { value: 'device' as CodexFingerprintMode, label: t('admin.accounts.openai.codexFingerprintDevice') },
@@ -2139,8 +2152,14 @@ const buildUpdatePayload = (): Record<string, unknown> | null => {
     // off = 默认值，清键即可；device/session/full 是显式 opt-in，必须落键（#5610）。
     if (codexFingerprintMode.value !== 'off') {
       extra.codex_fingerprint_mode = codexFingerprintMode.value
+      if (codexFingerprintMode.value === 'device') {
+        extra.codex_fingerprint_seed_count = Math.min(16, Math.max(1, Number(codexFingerprintSeedCount.value) || 3))
+      } else {
+        delete extra.codex_fingerprint_seed_count
+      }
     } else {
       delete extra.codex_fingerprint_mode
+      delete extra.codex_fingerprint_seed_count
     }
   }
 
@@ -2412,6 +2431,7 @@ watch(
       enableCodexCLIOnlyAppServer.value = false
       enableCodexFingerprintMode.value = false
       codexFingerprintMode.value = 'off'
+      codexFingerprintSeedCount.value = 3
       enableOpenAICompactMode.value = false
       enableOpenAICompactModelMapping.value = false
       enableRpmLimit.value = false

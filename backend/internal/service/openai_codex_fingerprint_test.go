@@ -163,6 +163,61 @@ func TestResolveCodexFingerprintIDs_DeviceSessionAndThreadSourcesAreIndependent(
 	require.Equal(t, base.threadID, differentSession.threadID)
 }
 
+func TestCodexFingerprintDeviceSeedPool_IsStableAndAccountScoped(t *testing.T) {
+	seeds := []string{
+		testCodexFingerprintSeed,
+		"22222222-2222-4222-8222-222222222222",
+		"33333333-3333-4333-8333-333333333333",
+	}
+	account := &Account{ID: 701, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Extra: map[string]any{
+		codexFingerprintModeExtraKey:  string(codexFingerprintDevice),
+		codexFingerprintSeedExtraKey:  seeds[0],
+		codexFingerprintSeedsExtraKey: seeds,
+	}}
+	first := resolveCodexFingerprintIDsWithSources(account, "stable-session", "stable-thread", codexFingerprintDevice)
+	second := resolveCodexFingerprintIDsWithSources(account, "stable-session", "other-thread", codexFingerprintDevice)
+	require.NotNil(t, first)
+	require.NotNil(t, second)
+	require.Equal(t, first.seedIndex, second.seedIndex)
+	require.Equal(t, first.seed, second.seed)
+	require.Equal(t, first.sessionID, second.sessionID)
+
+	otherAccount := *account
+	otherAccount.ID = 702
+	other := resolveCodexFingerprintIDsWithSources(&otherAccount, "stable-session", "stable-thread", codexFingerprintDevice)
+	require.NotNil(t, other)
+	require.NotEqual(t, first.sessionID, other.sessionID)
+}
+
+func TestPrepareCodexFingerprintExtraForCreate_DeviceUsesConfiguredSeedCount(t *testing.T) {
+	extra := prepareCodexFingerprintExtraForCreate(PlatformOpenAI, AccountTypeOAuth, map[string]any{
+		codexFingerprintModeExtraKey:      string(codexFingerprintDevice),
+		codexFingerprintSeedCountExtraKey: 3,
+	})
+	seeds := codexFingerprintSeeds(extra)
+	require.Len(t, seeds, 3)
+	require.Equal(t, seeds[0], extra[codexFingerprintSeedExtraKey])
+}
+
+func TestPrepareCodexFingerprintExtraForUpdate_OffPreservesDeviceSeedPool(t *testing.T) {
+	seeds := []string{
+		testCodexFingerprintSeed,
+		"22222222-2222-4222-8222-222222222222",
+		"33333333-3333-4333-8333-333333333333",
+	}
+	account := &Account{ID: 703, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Extra: map[string]any{
+		codexFingerprintModeExtraKey:      string(codexFingerprintDevice),
+		codexFingerprintSeedExtraKey:      seeds[0],
+		codexFingerprintSeedsExtraKey:     seeds,
+		codexFingerprintSeedCountExtraKey: 3,
+	}}
+	updated := prepareCodexFingerprintExtraForUpdate(account, map[string]any{
+		codexFingerprintModeExtraKey: string(codexFingerprintOff),
+	})
+	require.Equal(t, seeds, codexFingerprintSeeds(updated))
+	require.Equal(t, 3, updated[codexFingerprintSeedCountExtraKey])
+}
+
 func TestApplyCodexFingerprintClientMetadata_DeviceModeUsesBodyIdentityFallback(t *testing.T) {
 	account := newTestOAuthAccount(104, map[string]any{codexFingerprintModeExtraKey: "device"})
 	ids := resolveCodexFingerprintIDsWithSources(account, "", "", codexFingerprintDevice)

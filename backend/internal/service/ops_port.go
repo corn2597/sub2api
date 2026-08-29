@@ -111,6 +111,11 @@ type OpsInsertErrorLogInput struct {
 	// It is set by OpsService.RecordError before persisting.
 	UpstreamErrorsJSON *string
 
+	// PreserveFullErrorDetails disables legacy diagnostic length caps for an
+	// HTTP2WS request. Sanitization still removes credentials and request bodies
+	// are never attached to this input.
+	PreserveFullErrorDetails bool
+
 	AuthLatencyMs      *int64
 	RoutingLatencyMs   *int64
 	UpstreamLatencyMs  *int64

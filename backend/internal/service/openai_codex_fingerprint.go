@@ -1,12 +1,14 @@
 package service
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"maps"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -81,8 +83,12 @@ const (
 )
 
 const (
-	codexFingerprintModeExtraKey = "codex_fingerprint_mode"
-	codexFingerprintSeedExtraKey = "codex_fingerprint_seed"
+	codexFingerprintModeExtraKey      = "codex_fingerprint_mode"
+	codexFingerprintSeedExtraKey      = "codex_fingerprint_seed"
+	codexFingerprintSeedsExtraKey     = "codex_fingerprint_seeds"
+	codexFingerprintSeedCountExtraKey = "codex_fingerprint_seed_count"
+	codexFingerprintDefaultSeedCount  = 3
+	codexFingerprintMaxSeedCount      = 16
 )
 
 func canonicalCodexFingerprintSeed(value any) (string, bool) {
@@ -108,6 +114,7 @@ func stripCodexFingerprintSeed(extra map[string]any) map[string]any {
 	}
 	stripped := maps.Clone(extra)
 	delete(stripped, codexFingerprintSeedExtraKey)
+	delete(stripped, codexFingerprintSeedsExtraKey)
 	return stripped
 }
 
@@ -134,10 +141,122 @@ func codexFingerprintModeRequiresSeed(mode codexFingerprintMode) bool {
 }
 
 func codexFingerprintSeed(extra map[string]any) (string, bool) {
-	if extra == nil {
+	seeds := codexFingerprintSeeds(extra)
+	if len(seeds) == 0 {
 		return "", false
 	}
-	return canonicalCodexFingerprintSeed(extra[codexFingerprintSeedExtraKey])
+	return seeds[0], true
+}
+
+func codexFingerprintSeeds(extra map[string]any) []string {
+	if extra == nil {
+		return nil
+	}
+	var values []any
+	switch raw := extra[codexFingerprintSeedsExtraKey].(type) {
+	case []any:
+		values = raw
+	case []string:
+		values = make([]any, len(raw))
+		for i := range raw {
+			values[i] = raw[i]
+		}
+	}
+	seeds := make([]string, 0, len(values)+1)
+	seen := make(map[string]struct{})
+	for _, value := range values {
+		if seed, ok := canonicalCodexFingerprintSeed(value); ok {
+			if _, exists := seen[seed]; !exists {
+				seeds = append(seeds, seed)
+				seen[seed] = struct{}{}
+			}
+		}
+	}
+	if seed, ok := canonicalCodexFingerprintSeed(extra[codexFingerprintSeedExtraKey]); ok {
+		if _, exists := seen[seed]; !exists {
+			seeds = append([]string{seed}, seeds...)
+		}
+	}
+	return seeds
+}
+
+func codexFingerprintSeedCount(extra map[string]any, mode codexFingerprintMode) int {
+	count := 1
+	if mode == codexFingerprintDevice {
+		count = codexFingerprintDefaultSeedCount
+	}
+	if extra != nil {
+		switch raw := extra[codexFingerprintSeedCountExtraKey].(type) {
+		case float64:
+			count = int(raw)
+		case int:
+			count = raw
+		case int64:
+			count = int(raw)
+		case string:
+			if parsed, err := strconv.Atoi(strings.TrimSpace(raw)); err == nil {
+				count = parsed
+			}
+		}
+	}
+	if mode != codexFingerprintDevice {
+		return 1
+	}
+	if count < 1 {
+		return 1
+	}
+	if count > codexFingerprintMaxSeedCount {
+		return codexFingerprintMaxSeedCount
+	}
+	return count
+}
+
+func codexFingerprintSeedPoolForAccount(account *Account, mode codexFingerprintMode) []string {
+	if account == nil || !codexFingerprintModeRequiresSeed(mode) {
+		return nil
+	}
+	seeds := codexFingerprintSeeds(account.Extra)
+	if len(seeds) == 0 {
+		return nil
+	}
+	if mode != codexFingerprintDevice {
+		return seeds[:1]
+	}
+	return seeds
+}
+
+func newCodexFingerprintSeedPool(count int) []string {
+	if count < 1 {
+		count = 1
+	}
+	if count > codexFingerprintMaxSeedCount {
+		count = codexFingerprintMaxSeedCount
+	}
+	seeds := make([]string, count)
+	for i := range seeds {
+		seeds[i] = newCodexFingerprintSeed()
+	}
+	return seeds
+}
+
+func expandCodexFingerprintSeedPool(seeds []string, count int) []string {
+	if count < 1 {
+		count = 1
+	}
+	if count > codexFingerprintMaxSeedCount {
+		count = codexFingerprintMaxSeedCount
+	}
+	if len(seeds) == 0 {
+		return newCodexFingerprintSeedPool(count)
+	}
+	result := append([]string(nil), seeds...)
+	for len(result) < count {
+		result = append(result, deriveStableUUIDv4(fmt.Sprintf("sub2api:codex-device-seed:v1:%s:%d", result[0], len(result))))
+	}
+	if len(result) > count {
+		result = result[:count]
+	}
+	return result
 }
 
 func prepareCodexFingerprintExtraForCreate(platform, accountType string, extra map[string]any) map[string]any {
@@ -145,10 +264,9 @@ func prepareCodexFingerprintExtraForCreate(platform, accountType string, extra m
 	if platform != PlatformOpenAI || (accountType != AccountTypeOAuth && accountType != AccountTypeSetupToken) || !codexFingerprintModeRequiresSeed(codexFingerprintModeFromExtra(prepared)) {
 		return prepared
 	}
-	if prepared == nil {
-		prepared = make(map[string]any, 1)
-	}
-	prepared[codexFingerprintSeedExtraKey] = newCodexFingerprintSeed()
+	mode := codexFingerprintModeFromExtra(prepared)
+	seeds := newCodexFingerprintSeedPool(codexFingerprintSeedCount(prepared, mode))
+	prepared = ensureCodexFingerprintSeedFields(prepared, seeds)
 	return prepared
 }
 
@@ -157,20 +275,39 @@ func prepareCodexFingerprintExtraForUpdate(account *Account, extra map[string]an
 	if account == nil || !account.IsOpenAIOAuthLike() {
 		return prepared
 	}
-	if seed, ok := codexFingerprintSeed(account.Extra); ok {
-		if prepared == nil {
-			prepared = make(map[string]any, 1)
-		}
-		prepared[codexFingerprintSeedExtraKey] = seed
-		return prepared
+	if prepared == nil {
+		prepared = make(map[string]any, 3)
 	}
-	if codexFingerprintModeRequiresSeed(codexFingerprintModeFromExtra(prepared)) {
-		if prepared == nil {
-			prepared = make(map[string]any, 1)
+	// Turning convergence off changes behavior but must not rotate identity.
+	// Keep the system-managed pool and its configured size so a later re-enable
+	// resumes the same device identities.
+	if _, exists := prepared[codexFingerprintSeedCountExtraKey]; !exists && account.Extra != nil {
+		if existingCount, exists := account.Extra[codexFingerprintSeedCountExtraKey]; exists {
+			prepared[codexFingerprintSeedCountExtraKey] = existingCount
 		}
-		prepared[codexFingerprintSeedExtraKey] = newCodexFingerprintSeed()
+	}
+	mode := codexFingerprintModeFromExtra(prepared)
+	existingSeeds := codexFingerprintSeeds(account.Extra)
+	if codexFingerprintModeRequiresSeed(mode) {
+		seeds := expandCodexFingerprintSeedPool(existingSeeds, codexFingerprintSeedCount(prepared, mode))
+		prepared = ensureCodexFingerprintSeedFields(prepared, seeds)
+	} else if len(existingSeeds) > 0 {
+		prepared = ensureCodexFingerprintSeedFields(prepared, existingSeeds)
 	}
 	return prepared
+}
+
+func ensureCodexFingerprintSeedFields(extra map[string]any, seeds []string) map[string]any {
+	if extra == nil {
+		extra = make(map[string]any, 2)
+	}
+	if len(seeds) == 0 {
+		return extra
+	}
+	clone := append([]string(nil), seeds...)
+	extra[codexFingerprintSeedExtraKey] = clone[0]
+	extra[codexFingerprintSeedsExtraKey] = clone
+	return extra
 }
 
 func sanitizedCodexFingerprintExtraUpdates(updates map[string]any) map[string]any {
@@ -179,6 +316,11 @@ func sanitizedCodexFingerprintExtraUpdates(updates map[string]any) map[string]an
 	}
 	sanitized := maps.Clone(updates)
 	delete(sanitized, codexFingerprintSeedExtraKey)
+	// Both the legacy scalar and the derived pool are system-managed.  The
+	// account create/update paths generate them from mode + seed_count; a
+	// key-level Extra patch must not allow callers to inject or replace the
+	// stable identity directly.
+	delete(sanitized, codexFingerprintSeedsExtraKey)
 	return sanitized
 }
 
@@ -280,6 +422,7 @@ type codexFingerprintIDs struct {
 	accountID                     int64
 	mode                          codexFingerprintMode
 	seed                          string
+	seedIndex                     int
 	installationID                string
 	sessionID                     string
 	threadID                      string
@@ -304,15 +447,25 @@ func resolveCodexFingerprintIDsWithSources(account *Account, clientSessionID, cl
 	if account == nil || mode == codexFingerprintOff {
 		return nil
 	}
-	seed, ok := codexFingerprintSeed(account.Extra)
-	if !ok {
+	seeds := codexFingerprintSeedPoolForAccount(account, mode)
+	if len(seeds) == 0 {
 		return nil
 	}
+	stableSessionKey := strings.TrimSpace(clientSessionID)
+	if stableSessionKey == "" {
+		stableSessionKey = strings.TrimSpace(clientThreadID)
+	}
+	seedIndex := 0
+	if stableSessionKey != "" {
+		seedIndex = selectCodexFingerprintSeedIndex(account.ID, stableSessionKey, seeds)
+	}
+	seed := seeds[seedIndex]
 
 	ids := &codexFingerprintIDs{
 		accountID:           account.ID,
 		mode:                mode,
 		seed:                seed,
+		seedIndex:           seedIndex,
 		turnStartedAtUnixMs: time.Now().UnixMilli(),
 		sourceSessionID:     strings.TrimSpace(clientSessionID),
 		sourceThreadID:      strings.TrimSpace(clientThreadID),
@@ -343,6 +496,26 @@ func resolveCodexFingerprintIDsWithSources(account *Account, clientSessionID, cl
 	}
 
 	return nil
+}
+
+// selectCodexFingerprintSeedIndex uses rendezvous hashing so a stable
+// account/session pair always selects the same persisted seed, while changing
+// the pool size remaps only the sessions affected by the added/removed seed.
+func selectCodexFingerprintSeedIndex(accountID int64, sessionID string, seeds []string) int {
+	if len(seeds) <= 1 {
+		return 0
+	}
+	keyPrefix := fmt.Sprintf("sub2api:codex-device-seed:v1:%d:%s:", accountID, sessionID)
+	bestIndex := 0
+	bestScore := sha256.Sum256([]byte(keyPrefix + seeds[0]))
+	for i := 1; i < len(seeds); i++ {
+		score := sha256.Sum256([]byte(keyPrefix + seeds[i]))
+		if bytes.Compare(score[:], bestScore[:]) > 0 {
+			bestIndex = i
+			bestScore = score
+		}
+	}
+	return bestIndex
 }
 
 func refreshScopedCodexFingerprintIDs(ids *codexFingerprintIDs, seed string) {

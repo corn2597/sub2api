@@ -529,6 +529,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	profitVetoCount := 0
 	failedAccountIDs := make(map[int64]struct{})
 	sameAccountRetryCount := make(map[int64]int)
+	var forcedRetryAccountID int64
 	var lastFailoverErr *service.UpstreamFailoverError
 	var oauth429FailoverState service.OpenAIOAuth429FailoverState
 	var passthroughFailoverState openAIPassthroughFailoverState
@@ -557,8 +558,12 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		}
 		// Select account supporting the requested model
 		reqLog.Debug("openai.account_selecting", zap.Int("excluded_account_count", len(failedAccountIDs)))
+		selectionCtx := c.Request.Context()
+		if forcedRetryAccountID > 0 {
+			selectionCtx = service.WithOpenAIForcedRetryAccount(selectionCtx, forcedRetryAccountID)
+		}
 		selection, scheduleDecision, err := h.gatewayService.SelectAccountWithSchedulerForCapability(
-			c.Request.Context(),
+			selectionCtx,
 			apiKey.GroupID,
 			previousResponseID,
 			sessionHash,
@@ -571,6 +576,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			!imageIntent,
 			requestPlatform,
 		)
+		forcedRetryAccountID = 0
 		if err != nil {
 			if failoverClientGone(c) {
 				reqLog.Info("openai.account_select_aborted_client_disconnected", zap.Error(err))
@@ -783,6 +789,8 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 						retryLimit := effectiveSameAccountRetryLimit(failoverErr, account)
 						if sameAccountRetryAllowed(failoverErr, sameAccountRetryCount[account.ID], retryLimit) {
 							sameAccountRetryCount[account.ID]++
+							forcedRetryAccountID = account.ID
+							service.AppendOpsRequestLifecycleEvent(c, service.OpsRequestLifecycleEvent{Event: "same_account_retry", Outcome: "retry", Scope: "request", Reason: string(failoverErr.Reason), AccountID: account.ID, Retry: sameAccountRetryCount[account.ID]})
 							retryDelay := sameAccountRetryDelayFor(failoverErr, sameAccountRetryCount[account.ID])
 							reqLog.Warn("openai.pool_mode_same_account_retry",
 								zap.Int64("account_id", account.ID),
@@ -797,6 +805,13 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 							case <-time.After(retryDelay):
 							}
 							continue
+						}
+						if failoverErr.RequestScopedTransient {
+							failoverErr.RetryableOnSameAccount = false
+							failoverErr.NextAccountAction = service.NextAccountStop
+							service.AppendOpsRequestLifecycleEvent(c, service.OpsRequestLifecycleEvent{Event: "retry_exhausted", Outcome: "returned_to_client", Scope: "request", Reason: string(failoverErr.Reason), AccountID: account.ID, Retry: sameAccountRetryCount[account.ID]})
+							h.handleFailoverExhausted(c, failoverErr, streamStarted)
+							return
 						}
 					}
 					h.gatewayService.RecordOpenAIAccountSwitch()
@@ -2948,6 +2963,18 @@ func (h *OpenAIGatewayHandler) handleStreamingAwareErrorWithCode(
 	// happens-before，接管 ResponseWriter），并升级为流内错误处理。
 	if service.StopOpenAICompactSSEKeepaliveCommitted(c) {
 		streamStarted = true
+	}
+	if service.PreserveFullOpsErrorDetails(c) {
+		outcome := "json_error"
+		if streamStarted {
+			outcome = "sse_error"
+		}
+		service.AppendOpsRequestLifecycleEvent(c, service.OpsRequestLifecycleEvent{
+			Event: "client_response_written", Outcome: outcome, Scope: "client", Reason: strconv.Itoa(status),
+		})
+		service.AppendOpsRequestLifecycleEvent(c, service.OpsRequestLifecycleEvent{
+			Event: "request_completed", Outcome: "failed", Scope: "request", Reason: errType,
+		})
 	}
 	if streamStarted {
 		if countTowardsSLA {

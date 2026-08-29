@@ -23,6 +23,7 @@ const (
 	openAIAccountScheduleLayerPreviousResponse = "previous_response_id"
 	openAIAccountScheduleLayerGuardianParent   = "guardian_parent"
 	openAIAccountScheduleLayerSessionSticky    = "session_hash"
+	openAIAccountScheduleLayerForcedRetry      = "forced_same_account_retry"
 	openAIAccountScheduleLayerLoadBalance      = "load_balance"
 	openAIAdvancedSchedulerSettingKey          = "openai_advanced_scheduler_enabled"
 )
@@ -75,6 +76,7 @@ type OpenAIAccountScheduleRequest struct {
 	GuardianParentAccountID int64
 	StickyPreviousAccountID int64
 	StickyWeighted          bool
+	ForceStickyAccount      bool
 	SubscriptionPriority    bool
 	PreserveStickyBinding   bool
 	RequirePrivacySet       bool
@@ -385,6 +387,20 @@ func (s *defaultOpenAIAccountScheduler) Select(
 		decision.LatencyMs = time.Since(start).Milliseconds()
 		s.metrics.recordSelect(decision)
 	}()
+	if req.ForceStickyAccount && req.StickyAccountID > 0 {
+		selection, _, err := s.selectBySessionHash(ctx, req)
+		if err != nil {
+			return nil, decision, err
+		}
+		if selection == nil || selection.Account == nil || selection.Account.ID != req.StickyAccountID {
+			return nil, decision, ErrNoAvailableAccounts
+		}
+		decision.Layer = openAIAccountScheduleLayerForcedRetry
+		decision.StickySessionHit = true
+		decision.SelectedAccountID = selection.Account.ID
+		decision.SelectedAccountType = selection.Account.Type
+		return selection, decision, nil
+	}
 
 	previousResponseID := strings.TrimSpace(req.PreviousResponseID)
 	if previousResponseID != "" && NormalizeOpenAICompatiblePlatform(req.Platform) == PlatformOpenAI &&
@@ -490,13 +506,13 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 	req OpenAIAccountScheduleRequest,
 ) (*AccountSelectionResult, bool, error) {
 	sessionHash := strings.TrimSpace(req.SessionHash)
-	if sessionHash == "" || s == nil || s.service == nil || s.service.cache == nil {
+	if s == nil || s.service == nil || (!req.ForceStickyAccount && (sessionHash == "" || s.service.cache == nil)) {
 		return nil, false, nil
 	}
 
 	accountID := req.StickyAccountID
 	clearBinding := func() {
-		if !req.PreserveStickyBinding {
+		if !req.ForceStickyAccount && !req.PreserveStickyBinding {
 			_ = s.service.deleteStickySessionAccountID(ctx, req.GroupID, sessionHash)
 		}
 	}
@@ -555,7 +571,7 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 		return nil, false, nil
 	}
 	escapeCfg := s.service.openAIStickyEscapeConfig()
-	if reason, errorRate, ttft, shouldEscape := s.shouldEscapeStickyAccount(accountID, escapeCfg); shouldEscape {
+	if reason, errorRate, ttft, shouldEscape := s.shouldEscapeStickyAccount(accountID, escapeCfg); !req.ForceStickyAccount && shouldEscape {
 		slog.Info("sticky_escape_triggered",
 			"account_id", accountID,
 			"reason", reason,
@@ -566,7 +582,7 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 	}
 	result, acquireErr := s.service.tryAcquireAccountSlot(ctx, accountID, account.Concurrency)
 	if acquireErr == nil && result != nil && result.Acquired {
-		if !req.PreserveStickyBinding {
+		if !req.ForceStickyAccount && !req.PreserveStickyBinding {
 			_ = s.service.refreshStickySessionTTL(ctx, req.GroupID, sessionHash, s.service.openAIWSSessionStickyTTL())
 		}
 		return attachSelectionProfitGate(ctx, &AccountSelectionResult{
@@ -2180,6 +2196,22 @@ func (s *OpenAIGatewayService) selectAccountWithScheduler(
 
 type openAIGroupPrivacyRequirementContextKey struct{}
 
+type openAIForcedRetryAccountIDContextKey struct{}
+
+// WithOpenAIForcedRetryAccount pins the next scheduler pass to one account.
+// It is request-local and is used only while replaying a request-scoped error.
+func WithOpenAIForcedRetryAccount(ctx context.Context, accountID int64) context.Context {
+	return context.WithValue(ctx, openAIForcedRetryAccountIDContextKey{}, accountID)
+}
+
+func openAIForcedRetryAccountID(ctx context.Context) int64 {
+	if ctx == nil {
+		return 0
+	}
+	accountID, _ := ctx.Value(openAIForcedRetryAccountIDContextKey{}).(int64)
+	return accountID
+}
+
 type openAIGroupPrivacyRequirement struct {
 	groupID  int64
 	required bool
@@ -2244,6 +2276,30 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 		guardianParentAccountID = s.resolveOpenAIGuardianParentAccountID(ctx, groupID)
 	}
 	scheduler := s.getOpenAIAccountScheduler(ctx)
+	if forcedAccountID := openAIForcedRetryAccountID(ctx); forcedAccountID > 0 {
+		if s.checkChannelPricingRestriction(ctx, groupID, requestedModel) {
+			return nil, decision, fmt.Errorf("%w supporting model: %s (channel pricing restriction)", ErrNoAvailableAccounts, requestedModel)
+		}
+		if scheduler == nil {
+			scheduler = &defaultOpenAIAccountScheduler{service: s, stats: newOpenAIAccountRuntimeStats()}
+		}
+		return scheduler.Select(ctx, OpenAIAccountScheduleRequest{
+			GroupID:                 groupID,
+			Platform:                platform,
+			SessionHash:             sessionHash,
+			StickyAccountID:         forcedAccountID,
+			ForceStickyAccount:      true,
+			PreserveStickyBinding:   true,
+			RequirePrivacySet:       s.openAIGroupRequiresPrivacySet(ctx, groupID),
+			UseUpstreamTokenCost:    useUpstreamTokenCost,
+			RequestedModel:          requestedModel,
+			RequiredTransport:       requiredTransport,
+			RequiredCapability:      requiredCapability,
+			RequiredImageCapability: requiredImageCapability,
+			RequireCompact:          requireCompact,
+			ExcludedIDs:             excludedIDs,
+		})
+	}
 	if scheduler == nil {
 		decision.Layer = openAIAccountScheduleLayerLoadBalance
 		if guardianParentAccountID > 0 {

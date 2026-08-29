@@ -95,6 +95,36 @@ func TestEstimateOpsErrorLogJobBytesIncludesVariablePayloads(t *testing.T) {
 	}
 }
 
+func TestPrependOpsLifecycleEvents_PersistsMetadataWithoutRequestBody(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	service.MarkOpsPreserveFullErrorDetails(c)
+	service.AppendOpsRequestLifecycleEvent(c, service.OpsRequestLifecycleEvent{
+		Event: "same_account_retry", Outcome: "retry", Scope: "request", Reason: "server_is_overloaded", AccountID: 42, ConnID: "conn-stable", Retry: 2,
+	})
+
+	entry := &service.OpsInsertErrorLogInput{PreserveFullErrorDetails: true, UpstreamErrors: []*service.OpsUpstreamErrorEvent{{
+		Kind: "request_error", Message: "upstream failed", UpstreamResponseBody: `{"error":{"message":"full upstream detail"}}`,
+	}}}
+	prependOpsLifecycleEvents(c, entry)
+	require.Len(t, entry.UpstreamErrors, 2)
+	require.Equal(t, "lifecycle", entry.UpstreamErrors[0].Kind)
+	require.Equal(t, "same_account_retry", entry.UpstreamErrors[0].Event)
+	require.Equal(t, "conn-stable", entry.UpstreamErrors[0].UpstreamRequestID)
+	require.Equal(t, "retry=2", entry.UpstreamErrors[0].Detail)
+	require.NotContains(t, entry.UpstreamErrors[0].Detail, "request body")
+
+	require.NoError(t, service.SanitizeOpsUpstreamErrorsForQueue(entry))
+	require.NotNil(t, entry.UpstreamErrorsJSON)
+	events, err := service.ParseOpsUpstreamErrors(*entry.UpstreamErrorsJSON)
+	require.NoError(t, err)
+	require.Len(t, events, 2)
+	require.Equal(t, "same_account_retry", events[0].Event)
+	require.Contains(t, events[1].UpstreamResponseBody, "full upstream detail")
+}
+
 func resetOpsErrorLoggerStateForTest(t *testing.T) {
 	t.Helper()
 
@@ -1827,7 +1857,7 @@ func TestOpsCaptureWriter_DetectsCROnlySSEFrame(t *testing.T) {
 
 func TestSanitizeOpsSSEDataForPersistence_RedactsJSONFields(t *testing.T) {
 	body := []byte("event: error\ndata: {\"type\":\"error\",\"authorization\":\"Bearer secret\",\ndata: \"nested\":{\"api_key\":\"sk-secret\"}}\n\n")
-	sanitized := sanitizeOpsSSEDataForPersistence(body)
+	sanitized := sanitizeOpsSSEDataForPersistence(body, false)
 	require.NotContains(t, sanitized, "Bearer secret")
 	require.NotContains(t, sanitized, "sk-secret")
 	require.Contains(t, sanitized, `"authorization":"[REDACTED]"`)
@@ -1836,7 +1866,7 @@ func TestSanitizeOpsSSEDataForPersistence_RedactsJSONFields(t *testing.T) {
 
 func TestSanitizeOpsSSEDataForPersistence_DropsTruncatedJSONFragment(t *testing.T) {
 	body := []byte("event: error\ndata: {\"type\":\"error\",\"authorization\":\"Bearer leaked")
-	sanitized := sanitizeOpsSSEDataForPersistence(body)
+	sanitized := sanitizeOpsSSEDataForPersistence(body, false)
 	require.NotContains(t, sanitized, "Bearer leaked")
 	require.Contains(t, sanitized, `data: {"payload_truncated":true}`)
 }

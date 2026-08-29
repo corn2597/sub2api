@@ -280,6 +280,7 @@ func TestCoderOpenAIWSClientDialer_EgressHandshakeErrorRestoresStatus(t *testing
 			"type": "sub2api.egress.handshake_error", "protocol": "3", "status": 429,
 			"headers":     map[string][]string{"retry-after": {"7"}},
 			"body_base64": base64.StdEncoding.EncodeToString([]byte(`{"error":{"type":"rate_limit_error"}}`)),
+			"message":     "upstream rejected websocket upgrade",
 		})
 		require.NoError(t, ws.Write(r.Context(), coderws.MessageText, payload))
 	})
@@ -296,4 +297,5 @@ func TestCoderOpenAIWSClientDialer_EgressHandshakeErrorRestoresStatus(t *testing
 	var handshakeErr *openAIWSHandshakeError
 	require.ErrorAs(t, err, &handshakeErr)
 	require.Contains(t, string(handshakeErr.Body), "rate_limit_error")
+	require.Contains(t, handshakeErr.Error(), "upstream rejected websocket upgrade")
 }

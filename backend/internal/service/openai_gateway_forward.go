@@ -106,6 +106,13 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	}
 	wsDecision := s.getOpenAIWSProtocolResolver().Resolve(account)
 	wsDecision = s.resolveOpenAIWSDecisionForRequest(c, account, body, wsDecision)
+	if GetOpenAIClientTransport(c) == OpenAIClientTransportHTTP && wsDecision.Transport == OpenAIUpstreamTransportResponsesWebsocketV2 {
+		if !PreserveFullOpsErrorDetails(c) {
+			MarkOpsPreserveFullErrorDetails(c)
+			AppendOpsRequestLifecycleEvent(c, OpsRequestLifecycleEvent{Event: "request_received", Outcome: "http_to_ws", AccountID: account.ID})
+			AppendOpsRequestLifecycleEvent(c, OpsRequestLifecycleEvent{Event: "route_selected", Outcome: "ctx_pool", Scope: "http2ws", AccountID: account.ID})
+		}
+	}
 	passthroughEnabled := account.IsOpenAIPassthroughEnabled()
 	compactPath := isOpenAIResponsesCompactPath(c)
 	if shouldFlattenOpenAIResponsesNamespaces(account, wsDecision.Transport, passthroughEnabled, compactPath) {
@@ -856,6 +863,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 					break
 				}
 				s.recordOpenAIWSRetryAttempt(backoff)
+				AppendOpsRequestLifecycleEvent(c, OpsRequestLifecycleEvent{Event: "ws_reconnect", Outcome: "retry", Scope: "connection", Reason: reason, AccountID: account.ID, Attempt: attempt, Retry: attempt})
 				logOpenAIWSModeInfo(
 					"reconnect_retry account_id=%d retry=%d max_retries=%d reason=%s backoff_ms=%d",
 					account.ID,

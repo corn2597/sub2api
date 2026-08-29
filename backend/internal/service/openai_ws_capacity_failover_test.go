@@ -3,9 +3,11 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -241,12 +243,110 @@ func TestForwardOpenAIWSV2CapacityFailedTerminalDoesNotAffectAccountHealth(t *te
 	defer cleanup()
 
 	result, err := runOpenAIWSCapacityTestForward(t, svc, account, c, true)
-	require.NoError(t, err)
-	require.NotNil(t, result)
-	require.True(t, result.RequestScopedTransient)
-	require.Equal(t, "response.failed", result.UpstreamTerminalEvent)
+	require.Nil(t, result)
+	require.Error(t, err)
+	var failoverErr *UpstreamFailoverError
+	require.ErrorAs(t, err, &failoverErr)
+	require.True(t, failoverErr.RequestScopedTransient)
+	require.True(t, failoverErr.ClientResponseWritten)
+	require.Equal(t, NextAccountStop, failoverErr.NextAccountAction)
 	require.Contains(t, recorder.Body.String(), `"code":"server_error"`)
 	require.NotContains(t, recorder.Body.String(), "server_is_overloaded")
+}
+
+func TestForwardOpenAIWSV2CapacityFailedBeforeOutputRetriesSameConnection(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	events := []map[string]any{
+		{"type": "response.created", "response": map[string]any{"id": "resp_capacity_pre_output"}},
+		{"type": "response.failed", "response": map[string]any{"id": "resp_capacity_pre_output", "error": map[string]any{"code": "server_is_overloaded", "message": "Server is overloaded"}}},
+	}
+	svc, account, c, recorder, cleanup := newOpenAIWSCapacityTestService(t, events)
+	defer cleanup()
+
+	result, err := runOpenAIWSCapacityTestForward(t, svc, account, c, true)
+	require.Nil(t, result)
+	require.Error(t, err)
+	var failoverErr *UpstreamFailoverError
+	require.ErrorAs(t, err, &failoverErr)
+	require.True(t, failoverErr.RequestScopedTransient)
+	require.True(t, failoverErr.RetryableOnSameAccount)
+	require.False(t, failoverErr.ClientResponseWritten)
+	require.False(t, failoverErr.ShouldReportAccountScheduleFailure())
+	require.Empty(t, recorder.Body.String())
+	require.NotEmpty(t, getOpenAIWSRequestRetryConn(c, account.ID))
+}
+
+func TestForwardOpenAIWSV2CapacityRetryActuallyReusesSameSocket(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	var handshakes atomic.Int32
+	var requests atomic.Int32
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handshakes.Add(1)
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		for turn := 1; turn <= 2; turn++ {
+			var request map[string]any
+			if err := conn.ReadJSON(&request); err != nil {
+				return
+			}
+			requests.Add(1)
+			responseID := fmt.Sprintf("resp_same_socket_%d", turn)
+			if err := conn.WriteJSON(map[string]any{"type": "response.created", "response": map[string]any{"id": responseID}}); err != nil {
+				return
+			}
+			if err := conn.WriteJSON(map[string]any{
+				"type": "response.failed",
+				"response": map[string]any{
+					"id":    responseID,
+					"error": map[string]any{"code": "server_is_overloaded", "message": "Server is overloaded"},
+				},
+			}); err != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{}
+	cfg.Security.URLAllowlist.Enabled = false
+	cfg.Security.URLAllowlist.AllowInsecureHTTP = true
+	cfg.Gateway.OpenAIWS.Enabled = true
+	cfg.Gateway.OpenAIWS.APIKeyEnabled = true
+	cfg.Gateway.OpenAIWS.ResponsesWebsocketsV2 = true
+	cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 1
+	cfg.Gateway.OpenAIWS.MaxIdlePerAccount = 1
+	cfg.Gateway.OpenAIWS.QueueLimitPerConn = 4
+	cfg.Gateway.OpenAIWS.DialTimeoutSeconds = 2
+	cfg.Gateway.OpenAIWS.ReadTimeoutSeconds = 2
+	cfg.Gateway.OpenAIWS.WriteTimeoutSeconds = 2
+	svc := &OpenAIGatewayService{cfg: cfg, toolCorrector: NewCodexToolCorrector()}
+	defer func() {
+		if svc.openaiWSPool != nil {
+			svc.openaiWSPool.Close()
+		}
+	}()
+	account := &Account{
+		ID: 9002, Platform: PlatformOpenAI, Type: AccountTypeAPIKey,
+		Status: StatusActive, Schedulable: true, Concurrency: 1,
+		Credentials: map[string]any{"api_key": "sk-test", "base_url": server.URL},
+	}
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		result, err := runOpenAIWSCapacityTestForward(t, svc, account, c, true)
+		require.Nil(t, result)
+		var failoverErr *UpstreamFailoverError
+		require.ErrorAs(t, err, &failoverErr)
+		require.True(t, failoverErr.RetryableOnSameAccount)
+	}
+	require.Equal(t, int32(1), handshakes.Load())
+	require.Equal(t, int32(2), requests.Load())
 }
 
 func TestForwardOpenAIWSV2CapacityFailedWithEmbeddedOutputDoesNotReplay(t *testing.T) {
@@ -271,15 +371,19 @@ func TestForwardOpenAIWSV2CapacityFailedWithEmbeddedOutputDoesNotReplay(t *testi
 	defer cleanup()
 
 	result, err := runOpenAIWSCapacityTestForward(t, svc, account, c, true)
-	require.NoError(t, err)
-	require.NotNil(t, result)
-	require.True(t, result.RequestScopedTransient)
+	require.Nil(t, result)
+	require.Error(t, err)
+	var failoverErr *UpstreamFailoverError
+	require.ErrorAs(t, err, &failoverErr)
+	require.True(t, failoverErr.RequestScopedTransient)
+	require.True(t, failoverErr.ClientResponseWritten)
+	require.Equal(t, NextAccountStop, failoverErr.NextAccountAction)
 	require.Contains(t, recorder.Body.String(), "side_effect")
 	require.Contains(t, recorder.Body.String(), `"code":"server_error"`)
 	require.NotContains(t, recorder.Body.String(), "server_is_overloaded")
 }
 
-func TestForwardOpenAIWSV2CapacityAfterSemanticOutputReturnsJSONError(t *testing.T) {
+func TestForwardOpenAIWSV2CapacityBeforeNonStreamCommitRemainsRetryable(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	events := []map[string]any{
 		{"type": "response.created", "response": map[string]any{"id": "resp_capacity_3"}},
@@ -295,11 +399,8 @@ func TestForwardOpenAIWSV2CapacityAfterSemanticOutputReturnsJSONError(t *testing
 	var failoverErr *UpstreamFailoverError
 	require.ErrorAs(t, err, &failoverErr)
 	require.True(t, failoverErr.RequestScopedTransient)
-	require.True(t, failoverErr.ClientResponseWritten)
-	require.False(t, failoverErr.ShouldRetryNextAccount())
+	require.True(t, failoverErr.RetryableOnSameAccount)
+	require.False(t, failoverErr.ClientResponseWritten)
 	require.False(t, failoverErr.ShouldReportAccountScheduleFailure())
-	require.Equal(t, http.StatusBadGateway, recorder.Code)
-	body := recorder.Body.String()
-	require.Contains(t, body, `"code":"server_error"`)
-	require.True(t, strings.Contains(body, "Server is overloaded"))
+	require.Empty(t, recorder.Body.String())
 }

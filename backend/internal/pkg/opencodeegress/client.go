@@ -29,7 +29,6 @@ const (
 	TargetProxyHeader     = "X-Sub2API-Target-Proxy"
 	TargetIdentityHeader  = "X-Sub2API-Target-Identity"
 	DefaultControlTimeout = 120 * time.Second
-	maxErrorBodyLen       = 64 << 10
 )
 
 type Settings struct {
@@ -155,12 +154,9 @@ func (c *Client) CallJSON(ctx context.Context, path string, payload any) (int, [
 		return 0, nil, err
 	}
 	defer resp.Body.Close()
-	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyLen+1))
+	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return resp.StatusCode, nil, err
-	}
-	if len(responseBody) > maxErrorBodyLen {
-		return resp.StatusCode, nil, errors.New("sidecar control response exceeds 64 KiB")
 	}
 	return resp.StatusCode, responseBody, nil
 }
@@ -178,11 +174,11 @@ func (c *Client) Health(ctx context.Context) (*Health, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyLen))
+		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("sidecar health returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	var health Health
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxErrorBodyLen)).Decode(&health); err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&health); err != nil {
 		return nil, err
 	}
 	return &health, nil
@@ -242,7 +238,7 @@ func (c *Client) ProxyHTTP(
 		return nil, err
 	}
 	if resp.Header.Get(ProtocolHeader) != ProtocolVersion {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyLen))
+		body, _ := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
 		return nil, fmt.Errorf("sidecar proxy rejected request (status %d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}

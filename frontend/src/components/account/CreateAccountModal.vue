@@ -3214,6 +3214,20 @@
             <Select v-model="codexFingerprintMode" data-testid="create-codex-fingerprint-mode-select" :options="codexFingerprintModeOptions" />
           </div>
         </div>
+        <div class="mt-3 flex items-center justify-between gap-4" :class="codexFingerprintMode !== 'device' && 'opacity-50'">
+          <div>
+            <label class="input-label mb-0">{{ t('admin.accounts.openai.codexFingerprintSeedCount') }}</label>
+          </div>
+          <input
+            v-model.number="codexFingerprintSeedCount"
+            data-testid="create-codex-fingerprint-seed-count"
+            type="number"
+            min="1"
+            max="16"
+            class="input w-28"
+            :disabled="codexFingerprintMode !== 'device'"
+          />
+        </div>
       </div>
 
       <!-- OpenAI Compact 能力配置 -->
@@ -4227,6 +4241,7 @@ const codexCLIOnlyEnabled = ref(false)
 const codexCLIOnlyAppServerEnabled = ref(false)
 type CodexFingerprintMode = 'off' | 'device' | 'session' | 'full'
 const codexFingerprintMode = ref<CodexFingerprintMode>('off')
+const codexFingerprintSeedCount = ref(3)
 const codexFingerprintModeOptions = computed(() => [
   { value: 'off' as CodexFingerprintMode, label: t('admin.accounts.openai.codexFingerprintOff') },
   { value: 'device' as CodexFingerprintMode, label: t('admin.accounts.openai.codexFingerprintDevice') },
@@ -5140,6 +5155,7 @@ const resetForm = () => {
   codexCLIOnlyEnabled.value = false
   codexCLIOnlyAppServerEnabled.value = false
   codexFingerprintMode.value = 'off'
+  codexFingerprintSeedCount.value = 3
   anthropicPassthroughEnabled.value = false
   anthropicAPIKeyAuthScheme.value = 'x_api_key'
   webSearchEmulationMode.value = 'default'
@@ -5248,8 +5264,14 @@ const buildOpenAIExtra = (base?: Record<string, unknown>): Record<string, unknow
   // 否则管理员的选择会被当成默认而丢失（#5610）。
   if (codexFingerprintMode.value !== 'off') {
     extra.codex_fingerprint_mode = codexFingerprintMode.value
+    if (codexFingerprintMode.value === 'device') {
+      extra.codex_fingerprint_seed_count = Math.min(16, Math.max(1, Number(codexFingerprintSeedCount.value) || 3))
+    } else {
+      delete extra.codex_fingerprint_seed_count
+    }
   } else {
     delete extra.codex_fingerprint_mode
+    delete extra.codex_fingerprint_seed_count
   }
   if (openAICompactMode.value !== 'auto') {
     extra.openai_compact_mode = openAICompactMode.value

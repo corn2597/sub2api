@@ -1626,12 +1626,16 @@ func (s *OpenAIGatewayService) recordOpenAIStreamUpstreamError(
 	}
 	statusCode := openAIStreamFailureStatus(payload, message)
 	detail := ""
-	if len(payload) > 0 && s != nil && s.cfg != nil && s.cfg.Gateway.LogUpstreamErrorBody {
-		maxBytes := s.cfg.Gateway.LogUpstreamErrorBodyMaxBytes
-		if maxBytes <= 0 {
-			maxBytes = 2048
+	if len(payload) > 0 && (PreserveFullOpsErrorDetails(c) || (s != nil && s.cfg != nil && s.cfg.Gateway.LogUpstreamErrorBody)) {
+		if PreserveFullOpsErrorDetails(c) {
+			detail, _ = sanitizeErrorBodyWithoutTruncation(string(payload))
+		} else {
+			maxBytes := s.cfg.Gateway.LogUpstreamErrorBodyMaxBytes
+			if maxBytes <= 0 {
+				maxBytes = 2048
+			}
+			detail = truncateString(string(payload), maxBytes)
 		}
-		detail = truncateString(string(payload), maxBytes)
 	}
 	if c != nil {
 		setOpsUpstreamError(c, statusCode, message, detail)

@@ -215,7 +215,13 @@ func enqueueOpsErrorLog(ops *service.OpsService, entry *service.OpsInsertErrorLo
 	entry.UserAgent = normalizeOpsPersistentUserAgent(entry.UserAgent)
 	if entry.ErrorBody != "" {
 		originalBody := entry.ErrorBody
-		body, truncated := service.SanitizeOpsErrorBodyForQueue(originalBody)
+		var body string
+		var truncated bool
+		if entry.PreserveFullErrorDetails {
+			body, truncated = service.SanitizeOpsErrorBodyFullForQueue(originalBody)
+		} else {
+			body, truncated = service.SanitizeOpsErrorBodyForQueue(originalBody)
+		}
 		entry.ErrorBody = body
 		if truncated || body != originalBody {
 			opsErrorLogSanitized.Add(1)
@@ -1181,8 +1187,9 @@ func OpsErrorLoggerMiddleware(ops *service.OpsService) gin.HandlerFunc {
 		phase, isBusinessLimited, errorOwner, errorSource := classifyOpsErrorLog(c, normalizedType, parsed.Message, parsed.Code, status)
 
 		entry := &service.OpsInsertErrorLogInput{
-			RequestID:       requestID,
-			ClientRequestID: clientRequestID,
+			PreserveFullErrorDetails: service.PreserveFullOpsErrorDetails(c),
+			RequestID:                requestID,
+			ClientRequestID:          clientRequestID,
 
 			AccountID: accountID,
 			Platform:  platform,
@@ -1228,7 +1235,7 @@ func OpsErrorLoggerMiddleware(ops *service.OpsService) gin.HandlerFunc {
 
 			ErrorMessage: parsed.Message,
 			// Sanitize each SSE data payload before the body enters the async queue.
-			ErrorBody:   sanitizeOpsSSEDataForPersistence(body),
+			ErrorBody:   sanitizeOpsSSEDataForPersistence(body, service.PreserveFullOpsErrorDetails(c)),
 			ErrorSource: errorSource,
 			ErrorOwner:  errorOwner,
 
@@ -1245,6 +1252,7 @@ func OpsErrorLoggerMiddleware(ops *service.OpsService) gin.HandlerFunc {
 				entry.UpstreamStatusCode = &finalStatus
 			}
 		}
+		prependOpsLifecycleEvents(c, entry)
 		suppressOpsUpstreamAttributionForLocalModelConfiguration(c, entry)
 
 		if apiKey != nil {
@@ -1278,7 +1286,10 @@ func logOpsRecoveredUpstream(c *gin.Context, ops *service.OpsService, finalStatu
 		return
 	}
 
-	entry := &service.OpsInsertErrorLogInput{StatusCode: finalStatus}
+	entry := &service.OpsInsertErrorLogInput{
+		StatusCode:               finalStatus,
+		PreserveFullErrorDetails: service.PreserveFullOpsErrorDetails(c),
+	}
 	applyOpsUpstreamFieldsFromContext(c, entry)
 	if len(entry.UpstreamErrors) > 0 {
 		visibleEvents := make([]*service.OpsUpstreamErrorEvent, 0, len(entry.UpstreamErrors))
@@ -1337,7 +1348,9 @@ func logOpsRecoveredUpstream(c *gin.Context, ops *service.OpsService, finalStatu
 	if entry.UpstreamErrorMessage != nil && strings.TrimSpace(*entry.UpstreamErrorMessage) != "" {
 		entry.ErrorMessage += ": " + strings.TrimSpace(*entry.UpstreamErrorMessage)
 	}
-	entry.ErrorMessage = truncateString(entry.ErrorMessage, 2048)
+	if !entry.PreserveFullErrorDetails {
+		entry.ErrorMessage = truncateString(entry.ErrorMessage, 2048)
+	}
 
 	if c.Request != nil {
 		entry.UserAgent = c.GetHeader("User-Agent")
@@ -1476,8 +1489,9 @@ func logOpsStreamErrorValue(c *gin.Context, ops *service.OpsService, wireStatus 
 	}
 
 	entry := &service.OpsInsertErrorLogInput{
-		RequestID:       requestID,
-		ClientRequestID: clientRequestID,
+		PreserveFullErrorDetails: service.PreserveFullOpsErrorDetails(c),
+		RequestID:                requestID,
+		ClientRequestID:          clientRequestID,
 
 		AccountID: accountID,
 		Platform:  platform,
@@ -1534,6 +1548,7 @@ func logOpsStreamErrorValue(c *gin.Context, ops *service.OpsService, wireStatus 
 	if streamErr.Turn > 0 {
 		applyOpsStreamErrorSnapshot(entry, streamErr)
 	}
+	prependOpsLifecycleEvents(c, entry)
 
 	if apiKey != nil {
 		entry.APIKeyID = &apiKey.ID
@@ -1714,6 +1729,56 @@ func applyOpsUpstreamErrorEvents(entry *service.OpsInsertErrorLogInput, events [
 	if detail := strings.TrimSpace(last.Detail); detail != "" {
 		entry.UpstreamErrorDetail = &detail
 	}
+}
+
+// prependOpsLifecycleEvents adds payload-free HTTP2WS stage markers ahead of
+// the real upstream attempts. Keeping markers first preserves the final
+// upstream error as the top-level message/status while exposing the complete
+// request path in the existing error-detail JSON field.
+func prependOpsLifecycleEvents(c *gin.Context, entry *service.OpsInsertErrorLogInput) {
+	if c == nil || entry == nil || !service.PreserveFullOpsErrorDetails(c) {
+		return
+	}
+	events := service.GetOpsRequestLifecycleEvents(c)
+	if len(events) == 0 {
+		return
+	}
+	markers := make([]*service.OpsUpstreamErrorEvent, 0, len(events))
+	for _, event := range events {
+		if strings.TrimSpace(event.Event) == "" {
+			continue
+		}
+		markers = append(markers, &service.OpsUpstreamErrorEvent{
+			AtUnixMs:          event.AtUnixMs,
+			AccountID:         event.AccountID,
+			UpstreamRequestID: event.ConnID,
+			Kind:              "lifecycle",
+			Event:             event.Event,
+			Stage:             event.Event,
+			Scope:             event.Scope,
+			Reason:            event.Reason,
+			Message:           event.Outcome,
+			Detail:            lifecycleEventDetail(event),
+		})
+	}
+	if len(markers) == 0 {
+		return
+	}
+	combined := make([]*service.OpsUpstreamErrorEvent, 0, len(markers)+len(entry.UpstreamErrors))
+	combined = append(combined, markers...)
+	combined = append(combined, entry.UpstreamErrors...)
+	entry.UpstreamErrors = combined
+}
+
+func lifecycleEventDetail(event service.OpsRequestLifecycleEvent) string {
+	parts := make([]string, 0, 2)
+	if event.Attempt > 0 {
+		parts = append(parts, "attempt="+strconv.Itoa(event.Attempt))
+	}
+	if event.Retry > 0 {
+		parts = append(parts, "retry="+strconv.Itoa(event.Retry))
+	}
+	return strings.Join(parts, " ")
 }
 
 func suppressOpsUpstreamAttributionForLocalModelConfiguration(c *gin.Context, entry *service.OpsInsertErrorLogInput) {
@@ -1953,7 +2018,7 @@ func opsSSEErrorObject(event map[string]any) map[string]any {
 	return nil
 }
 
-func sanitizeOpsSSEDataForPersistence(body []byte) string {
+func sanitizeOpsSSEDataForPersistence(body []byte, preserveFull bool) string {
 	if len(body) == 0 || !bytes.Contains(body, []byte("data")) {
 		return string(body)
 	}
@@ -1970,7 +2035,11 @@ func sanitizeOpsSSEDataForPersistence(body []byte) string {
 		trimmedPayload := bytes.TrimSpace(payload)
 		replacement := ""
 		if json.Valid(trimmedPayload) {
-			replacement, _ = service.SanitizeOpsErrorBodyForQueue(string(trimmedPayload))
+			if preserveFull {
+				replacement, _ = service.SanitizeOpsErrorBodyFullForQueue(string(trimmedPayload))
+			} else {
+				replacement, _ = service.SanitizeOpsErrorBodyForQueue(string(trimmedPayload))
+			}
 		} else if len(trimmedPayload) > 0 && (trimmedPayload[0] == '{' || trimmedPayload[0] == '[') {
 			// Captured terminal frames can be truncated at the queue bound. Never
 			// persist a JSON-looking fragment that could contain an unredacted key.

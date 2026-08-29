@@ -71,6 +71,12 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	firstClientMessage []byte,
 	hooks *OpenAIWSIngressHooks,
 ) (returnErr error) {
+	if GetOpenAIClientTransport(c) == OpenAIClientTransportHTTP {
+		// HTTP2WS diagnostics keep complete sanitized upstream error text. The
+		// request body is never copied into Ops fields.
+		MarkOpsPreserveFullErrorDetails(c)
+		AppendOpsRequestLifecycleEvent(c, OpsRequestLifecycleEvent{Event: "request_received", Outcome: "http_to_ws"})
+	}
 	if s == nil {
 		return errors.New("service is nil")
 	}
@@ -115,11 +121,13 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	}
 
 	wsDecision := s.getOpenAIWSProtocolResolver().Resolve(account)
-	// OpenCode sidecar is the final OpenAI egress when enabled. Do not let the
-	// generic OAuth plugin force this WS session into its HTTP bridge, otherwise
-	// one account can switch outbound identity mid-conversation.
-	forceHTTPBridge := account.Platform == PlatformGrok ||
-		(!openCodeSidecarOwnsOpenAIWS(s.cfg) && s.pluginManager != nil && s.pluginManager.ShouldRouteOpenAIOAuth(account))
+	// HTTP2WS is intentionally a single ctx_pool path. Large HTTP payloads are
+	// admitted by the 256 MiB WS limit and fragmented into continuation frames;
+	// they must not be diverted into the legacy HTTP bridge. Keep the bridge
+	// decision available for native WS/Grok compatibility only.
+	clientIsHTTP := GetOpenAIClientTransport(c) == OpenAIClientTransportHTTP
+	forceHTTPBridge := !clientIsHTTP && (account.Platform == PlatformGrok ||
+		(!openCodeSidecarOwnsOpenAIWS(s.cfg) && s.pluginManager != nil && s.pluginManager.ShouldRouteOpenAIOAuth(account)))
 	modeRouterV2Enabled := s != nil && s.cfg != nil && s.cfg.Gateway.OpenAIWS.ModeRouterV2Enabled
 	ingressMode := OpenAIWSIngressModeCtxPool
 	if modeRouterV2Enabled && !forceHTTPBridge {
@@ -130,6 +138,13 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				"websocket mode is disabled for this account",
 				nil,
 			)
+		}
+		if clientIsHTTP {
+			// HTTP2WS must use the Sub2API-managed connection pool. Legacy
+			// account values such as passthrough/http_bridge are normalized here
+			// so a request cannot silently leave ctx_pool.
+			ingressMode = OpenAIWSIngressModeCtxPool
+			AppendOpsRequestLifecycleEvent(c, OpsRequestLifecycleEvent{Event: "route_selected", Outcome: string(ingressMode), Scope: "http2ws"})
 		}
 		switch ingressMode {
 		case OpenAIWSIngressModePassthrough:
@@ -150,7 +165,13 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				wsDecision,
 			)
 		case OpenAIWSIngressModeHTTPBridge:
-			forceHTTPBridge = true
+			if clientIsHTTP {
+				// HTTP2WS never uses the legacy bridge, even if an old account-level
+				// mode value is still present in the database.
+				ingressMode = OpenAIWSIngressModeCtxPool
+			} else {
+				forceHTTPBridge = true
+			}
 		case OpenAIWSIngressModeCtxPool, OpenAIWSIngressModeShared, OpenAIWSIngressModeDedicated:
 			// continue
 		default:
@@ -548,7 +569,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	}
 	refreshIngressRouteState(firstPayload)
 
-	if forceHTTPBridge || s.shouldBridgeOpenAIWSHTTP(account, firstPayload.payloadBytes, firstPayload.previousResponseID) {
+	if forceHTTPBridge || (!clientIsHTTP && s.shouldBridgeOpenAIWSHTTP(account, firstPayload.payloadBytes, firstPayload.previousResponseID)) {
 		logOpenAIWSModeInfo(
 			"ingress_ws_http_bridge_start account_id=%d account_type=%s payload_bytes=%d threshold_bytes=%d has_session_hash=%v store_disabled=%v",
 			account.ID,
@@ -1150,7 +1171,6 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			capacityShed := (eventType == "error" || eventType == "response.failed") && isOpenAIUpstreamCapacityShedEvent(upstreamMessage)
 			if capacityShed {
 				requestScopedTransient = true
-				lease.MarkBroken()
 				if !semanticOutputSeen && !startsSemanticOutput && !wroteDownstream {
 					failoverErr := s.newOpenAIStreamFailoverError(c, account, false, lease.HandshakeHeaders().Get("x-request-id"), upstreamMessage, strings.TrimSpace(extractOpenAISSEErrorMessage(upstreamMessage)), lease.HandshakeHeaders())
 					failoverErr.RequestScopedTransient = true
@@ -1810,7 +1830,8 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 						delay.Milliseconds(),
 						truncateOpenAIWSLogValue(connID, openAIWSIDValueMaxLen),
 					)
-					resetSessionLease(true)
+					// Keep the current healthy lease held. The next attempt must be
+					// sent on the same WS before considering a same-account rebuild.
 					skipBeforeTurn = true
 					timer := time.NewTimer(delay)
 					select {
@@ -1834,6 +1855,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 					}
 					capacityErr.ClientResponseWritten = true
 				}
+				resetSessionLease(false)
 				if hooks != nil && hooks.AfterTurn != nil {
 					hooks.AfterTurn(turn, nil, capacityErr)
 				}

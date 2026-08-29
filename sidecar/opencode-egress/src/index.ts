@@ -57,6 +57,7 @@ type SocketData = {
   sending: boolean
   paused: boolean
   handshakeReported: boolean
+  handshakeCapturing: boolean
 }
 
 function parsePositiveInteger(name: string, fallback: number) {
@@ -77,7 +78,15 @@ function json(data: unknown, status = 200, headers?: HeadersInit) {
 function controlledError(error: unknown) {
   const name = error instanceof Error ? error.name : "Error"
   const timeout = name === "TimeoutError" || name === "AbortError" && /timeout/i.test(String(error))
-  return json({ error: { type: timeout ? "upstream_timeout" : "upstream_transport_error" } }, timeout ? 504 : 502)
+  const message = error instanceof Error ? error.message : String(error)
+  const cause = error instanceof Error && error.cause instanceof Error ? error.cause.message : undefined
+  return json({
+    error: {
+      type: timeout ? "upstream_timeout" : "upstream_transport_error",
+      message,
+      ...(cause ? { detail: cause } : {}),
+    },
+  }, timeout ? 504 : 502)
 }
 
 function authorized(request: Request) {
@@ -194,7 +203,7 @@ async function proxyHTTP(request: Request) {
   // the original streaming behavior.
   let requestBody: BodyInit | undefined = method === "GET" || method === "HEAD"
     ? undefined
-    : request.body
+    : request.body ?? undefined
   if (targetProxy && requestBody) {
     try {
       requestBody = await readRequestBody(request, httpMaxBodyBytes)
@@ -260,6 +269,7 @@ function parseSocketData(request: Request): SocketData | null {
     sending: false,
     paused: false,
     handshakeReported: false,
+    handshakeCapturing: false,
   }
 }
 
@@ -376,6 +386,23 @@ async function connectUpstreamSocket(socket: Bun.ServerWebSocket<SocketData>) {
         headers: {},
       }))
     })
+    upstream.once("unexpected-response", (_request, response) => {
+      if (target.handshakeReported) return
+      target.handshakeCapturing = true
+      const chunks: Buffer[] = []
+      const responseHeaders: HeaderMap = {}
+      for (const [name, value] of Object.entries(response.headers)) {
+        if (typeof value === "string") responseHeaders[name] = value
+        else if (Array.isArray(value)) responseHeaders[name] = value
+      }
+      response.on("data", (chunk: Buffer | string) => chunks.push(Buffer.from(chunk)))
+      response.once("end", () => {
+        reportHandshakeFailure(socket, response.statusCode ?? 0, responseHeaders, Buffer.concat(chunks))
+      })
+      response.once("error", (error: Error) => {
+        reportHandshakeFailure(socket, response.statusCode ?? 0, responseHeaders, Buffer.concat(chunks), error)
+      })
+    })
     upstream.on("message", (message: RawData, isBinary: boolean) => {
       if (socket.readyState !== WebSocket.OPEN) return
       const bytes = toContiguousBytes(message)
@@ -388,27 +415,41 @@ async function connectUpstreamSocket(socket: Bun.ServerWebSocket<SocketData>) {
         upstream.pause()
       }
     })
-    upstream.on("error", () => {
-      if (!target.handshakeReported) reportHandshakeFailure(socket, 0)
-      else if (socket.readyState === WebSocket.OPEN) socket.close(1011, "upstream websocket error")
+    upstream.on("error", (error) => {
+      if (!target.handshakeReported) {
+        if (!target.handshakeCapturing) reportHandshakeFailure(socket, 0, {}, undefined, error)
+        return
+      }
+      if (socket.readyState === WebSocket.OPEN) socket.close(1011, "upstream websocket error")
     })
     upstream.on("close", (code, reason) => {
-      if (!target.handshakeReported) reportHandshakeFailure(socket, 0)
-      else if (socket.readyState === WebSocket.OPEN) socket.close(code || 1000, reason.toString() || "upstream closed")
+      if (!target.handshakeReported) {
+        if (!target.handshakeCapturing) reportHandshakeFailure(socket, 0)
+        return
+      }
+      if (socket.readyState === WebSocket.OPEN) socket.close(code || 1000, reason.toString() || "upstream closed")
     })
-  } catch {
-    reportHandshakeFailure(socket, 0)
+  } catch (error) {
+    reportHandshakeFailure(socket, 0, {}, undefined, error)
   }
 }
 
-function reportHandshakeFailure(socket: Bun.ServerWebSocket<SocketData>, status: number) {
+function reportHandshakeFailure(
+  socket: Bun.ServerWebSocket<SocketData>,
+  status: number,
+  headers: HeaderMap = {},
+  body?: Buffer,
+  error?: unknown,
+) {
   if (socket.data.handshakeReported || socket.readyState !== WebSocket.OPEN) return
   socket.data.handshakeReported = true
   socket.send(JSON.stringify({
     type: "sub2api.egress.handshake_error",
     protocol: protocolVersion,
     status,
-    headers: {},
+    headers,
+    ...(body?.length ? { body_base64: body.toString("base64") } : {}),
+    ...(error instanceof Error && error.message ? { message: error.message } : {}),
   }))
 }
 
@@ -505,9 +546,9 @@ function auditUpstreamFailure(targetURL: string, error: unknown) {
     host: target.host,
     path: target.pathname,
     error_name: error instanceof Error ? error.name : "Error",
-    error_message: error instanceof Error ? error.message.slice(0, 256) : String(error).slice(0, 256),
-    cause_code: cause && "code" in cause ? String(cause.code).slice(0, 64) : undefined,
-    cause_message: cause ? cause.message.slice(0, 256) : undefined,
+    error_message: error instanceof Error ? error.message : String(error),
+    cause_code: cause && "code" in cause ? String(cause.code) : undefined,
+    cause_message: cause ? cause.message : undefined,
   }))
 }
 

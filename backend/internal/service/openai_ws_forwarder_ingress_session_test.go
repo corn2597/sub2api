@@ -249,12 +249,10 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_CapacityRetriesB
 	firstConn := &openAIWSCaptureConn{events: [][]byte{
 		[]byte(`{"type":"response.created","response":{"id":"resp_capacity_discarded"}}`),
 		[]byte(`{"type":"error","error":{"message":"The servers are currently overloaded"}}`),
-	}}
-	secondConn := &openAIWSCaptureConn{events: [][]byte{
 		[]byte(`{"type":"response.created","response":{"id":"resp_capacity_ok"}}`),
 		[]byte(`{"type":"response.completed","response":{"id":"resp_capacity_ok","model":"gpt-5.1","usage":{"input_tokens":1,"output_tokens":1}}}`),
 	}}
-	dialer := &openAIWSQueueDialer{conns: []openAIWSClientConn{firstConn, secondConn}}
+	dialer := &openAIWSQueueDialer{conns: []openAIWSClientConn{firstConn}}
 	svc, pool, account := newOpenAIWSIngressCapacityTestService(t, dialer, 1)
 	defer pool.Close()
 
@@ -269,9 +267,8 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_CapacityRetriesB
 	require.NotContains(t, string(created), "resp_capacity_discarded")
 	require.Equal(t, "response.completed", gjson.GetBytes(completed, "type").String())
 	require.Equal(t, "resp_capacity_ok", gjson.GetBytes(completed, "response.id").String())
-	require.Equal(t, 2, dialer.DialCount(), "一次同账号重试应建立第二条上游连接")
-	require.Len(t, firstConn.writes, 1)
-	require.Len(t, secondConn.writes, 1)
+	require.Equal(t, 1, dialer.DialCount(), "请求级 overloaded 应复用同一条上游连接")
+	require.Len(t, firstConn.writes, 2)
 
 	_ = clientConn.Close(coderws.StatusNormalClosure, "done")
 	select {
