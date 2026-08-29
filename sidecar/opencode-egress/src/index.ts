@@ -1,4 +1,4 @@
-import { UpstreamWebSocket, type RawData, type UpstreamWebSocket as UpstreamWebSocketInstance } from "./upstream-websocket"
+import UpstreamWebSocket, { type RawData } from "ws"
 import { HttpsProxyAgent } from "https-proxy-agent"
 import { createHash } from "node:crypto"
 import {
@@ -12,6 +12,7 @@ import {
 } from "./fingerprint"
 import { fetchWithProxy, proxyForBun } from "./proxy"
 import { buildOAuthForm } from "./oauth"
+import { diagnoseWebSocketHandshake } from "./websocket-handshake-diagnostic"
 
 const OPENCODE_VERSION = process.env.OPENCODE_VERSION ?? "1.18.20"
 const bind = process.env.SUB2API_EGRESS_BIND ?? "127.0.0.1"
@@ -52,7 +53,7 @@ type SocketData = {
   targetURL: string
   targetHeaders: HeaderMap
   targetProxy?: string
-  upstream?: UpstreamWebSocketInstance
+  upstream?: UpstreamWebSocket
   ready: boolean
   sending: boolean
   paused: boolean
@@ -386,23 +387,6 @@ async function connectUpstreamSocket(socket: Bun.ServerWebSocket<SocketData>) {
         headers: {},
       }))
     })
-    upstream.once("unexpected-response", (_request, response) => {
-      if (target.handshakeReported) return
-      target.handshakeCapturing = true
-      const chunks: Buffer[] = []
-      const responseHeaders: HeaderMap = {}
-      for (const [name, value] of Object.entries(response.headers)) {
-        if (typeof value === "string") responseHeaders[name] = value
-        else if (Array.isArray(value)) responseHeaders[name] = value
-      }
-      response.on("data", (chunk: Buffer | string) => chunks.push(Buffer.from(chunk)))
-      response.once("end", () => {
-        reportHandshakeFailure(socket, response.statusCode ?? 0, responseHeaders, Buffer.concat(chunks))
-      })
-      response.once("error", (error: Error) => {
-        reportHandshakeFailure(socket, response.statusCode ?? 0, responseHeaders, Buffer.concat(chunks), error)
-      })
-    })
     upstream.on("message", (message: RawData, isBinary: boolean) => {
       if (socket.readyState !== WebSocket.OPEN) return
       const bytes = toContiguousBytes(message)
@@ -417,7 +401,16 @@ async function connectUpstreamSocket(socket: Bun.ServerWebSocket<SocketData>) {
     })
     upstream.on("error", (error) => {
       if (!target.handshakeReported) {
-        if (!target.handshakeCapturing) reportHandshakeFailure(socket, 0, {}, undefined, error)
+        if (!target.handshakeCapturing) {
+          target.handshakeCapturing = true
+          void diagnoseWebSocketHandshake(target.targetURL, headers, proxy).then((diagnostic) => {
+            reportHandshakeFailure(socket, diagnostic.status, diagnostic.headers, diagnostic.body, error)
+          }).catch((diagnosticError) => {
+            reportHandshakeFailure(socket, 0, {}, undefined, new Error(
+              `${errorMessage(error)}; handshake diagnostic failed: ${errorMessage(diagnosticError)}`,
+            ))
+          })
+        }
         return
       }
       if (socket.readyState === WebSocket.OPEN) socket.close(1011, "upstream websocket error")
@@ -449,8 +442,16 @@ function reportHandshakeFailure(
     status,
     headers,
     ...(body?.length ? { body_base64: body.toString("base64") } : {}),
-    ...(error instanceof Error && error.message ? { message: error.message } : {}),
+    ...(error ? { message: errorMessage(error) } : {}),
   }))
+}
+
+function errorMessage(error: unknown) {
+  if (error instanceof Error && error.message) return error.message
+  if (error && typeof error === "object" && "message" in error && typeof error.message === "string") {
+    return error.message
+  }
+  return String(error)
 }
 
 function toContiguousBytes(data: RawData) {
