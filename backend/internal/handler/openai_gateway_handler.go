@@ -344,6 +344,11 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Request body is empty")
 		return
 	}
+	if h.cfg != nil && h.cfg.Gateway.OpenAIWS.ErrorPayloadCaptureEnabled {
+		// Keep the exact ingress bytes before compact normalization, policy caps,
+		// model mapping, or any OpenAI/Codex compatibility transformation.
+		service.SetOpsHTTPErrorPayloadCandidate(c, body)
+	}
 
 	setOpsRequestContext(c, "", false)
 	sessionHashBody := body

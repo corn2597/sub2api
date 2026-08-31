@@ -128,6 +128,16 @@ func TestOpenAIWSErrorHTTPStatus(t *testing.T) {
 	require.Equal(t, http.StatusBadGateway, openAIWSErrorHTTPStatus([]byte(`{"type":"error","error":{"type":"server_error","code":"server_error","message":"server"}}`)))
 }
 
+func TestOpenAIWSRequestScopedErrorEvent(t *testing.T) {
+	message := []byte(`{"type":"error","status":400,"stream_id":"main","error":{"type":"invalid_request_error","code":"invalid_request","message":"Invalid request"}}`)
+	code, errType, _ := parseOpenAIWSErrorEventFields(message)
+	require.True(t, isOpenAIWSRequestScopedErrorEvent(message, code, errType))
+
+	connectionError := []byte(`{"type":"error","status":500,"error":{"type":"server_error","message":"server unavailable"}}`)
+	code, errType, _ = parseOpenAIWSErrorEventFields(connectionError)
+	require.False(t, isOpenAIWSRequestScopedErrorEvent(connectionError, code, errType))
+}
+
 func TestResolveOpenAIWSFallbackErrorResponse(t *testing.T) {
 	t.Run("previous_response_not_found", func(t *testing.T) {
 		statusCode, errType, clientMessage, upstreamMessage, ok := resolveOpenAIWSFallbackErrorResponse(

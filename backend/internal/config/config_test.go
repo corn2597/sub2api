@@ -527,6 +527,12 @@ func TestLoadDefaultOpenAIWSConfig(t *testing.T) {
 	if cfg.Gateway.OpenAIWS.PayloadLogSampleRate != 0.2 {
 		t.Fatalf("Gateway.OpenAIWS.PayloadLogSampleRate = %v, want 0.2", cfg.Gateway.OpenAIWS.PayloadLogSampleRate)
 	}
+	if cfg.Gateway.OpenAIWS.ErrorPayloadCaptureEnabled {
+		t.Fatalf("Gateway.OpenAIWS.ErrorPayloadCaptureEnabled = true, want false")
+	}
+	if cfg.Gateway.OpenAIWS.ErrorPayloadRetentionHours != 72 {
+		t.Fatalf("Gateway.OpenAIWS.ErrorPayloadRetentionHours = %d, want 72", cfg.Gateway.OpenAIWS.ErrorPayloadRetentionHours)
+	}
 	if cfg.Gateway.OpenAIWS.SchedulerScoreWeights.QuotaHeadroom != 0 {
 		t.Fatalf("Gateway.OpenAIWS.SchedulerScoreWeights.QuotaHeadroom = %v, want 0", cfg.Gateway.OpenAIWS.SchedulerScoreWeights.QuotaHeadroom)
 	}
@@ -2284,6 +2290,11 @@ func TestValidateConfig_OpenAIWSRules(t *testing.T) {
 			name:    "payload_log_sample_rate 必须在 [0,1] 范围内",
 			mutate:  func(c *Config) { c.Gateway.OpenAIWS.PayloadLogSampleRate = 1.2 },
 			wantErr: "gateway.openai_ws.payload_log_sample_rate",
+		},
+		{
+			name:    "error_payload_retention_hours 必须为正数",
+			mutate:  func(c *Config) { c.Gateway.OpenAIWS.ErrorPayloadRetentionHours = 0 },
+			wantErr: "gateway.openai_ws.error_payload_retention_hours",
 		},
 		{
 			name:    "retry_total_budget_ms 不能为负数",

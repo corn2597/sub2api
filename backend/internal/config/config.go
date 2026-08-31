@@ -1330,6 +1330,12 @@ type GatewayOpenAIWSConfig struct {
 	RetryTotalBudgetMS int `mapstructure:"retry_total_budget_ms"`
 	// PayloadLogSampleRate: payload_schema 日志采样率（0-1）
 	PayloadLogSampleRate float64 `mapstructure:"payload_log_sample_rate"`
+	// ErrorPayloadCaptureEnabled stores complete HTTP ingress and WS response.create
+	// payloads only when an HTTP2WS request ultimately fails. This is intentionally
+	// off by default because payloads can contain sensitive user content.
+	ErrorPayloadCaptureEnabled bool `mapstructure:"error_payload_capture_enabled"`
+	// ErrorPayloadRetentionHours controls how long captured error payloads are kept.
+	ErrorPayloadRetentionHours int `mapstructure:"error_payload_retention_hours"`
 
 	// 账号调度与粘连参数
 	LBTopK int `mapstructure:"lb_top_k"`
@@ -2445,6 +2451,8 @@ func setDefaults() {
 	viper.SetDefault("gateway.openai_ws.retry_jitter_ratio", 0.2)
 	viper.SetDefault("gateway.openai_ws.retry_total_budget_ms", 5000)
 	viper.SetDefault("gateway.openai_ws.payload_log_sample_rate", 0.2)
+	viper.SetDefault("gateway.openai_ws.error_payload_capture_enabled", false)
+	viper.SetDefault("gateway.openai_ws.error_payload_retention_hours", 72)
 	viper.SetDefault("gateway.openai_ws.lb_top_k", 7)
 	viper.SetDefault("gateway.openai_ws.sticky_session_ttl_seconds", 3600)
 	viper.SetDefault("gateway.openai_ws.session_hash_read_old_fallback", true)
@@ -3537,6 +3545,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Gateway.OpenAIWS.PayloadLogSampleRate < 0 || c.Gateway.OpenAIWS.PayloadLogSampleRate > 1 {
 		return fmt.Errorf("gateway.openai_ws.payload_log_sample_rate must be within [0,1]")
+	}
+	if c.Gateway.OpenAIWS.ErrorPayloadRetentionHours <= 0 || c.Gateway.OpenAIWS.ErrorPayloadRetentionHours > 24*30 {
+		return fmt.Errorf("gateway.openai_ws.error_payload_retention_hours must be within [1,720]")
 	}
 	if c.Gateway.OpenAIWS.LBTopK <= 0 {
 		return fmt.Errorf("gateway.openai_ws.lb_top_k must be positive")

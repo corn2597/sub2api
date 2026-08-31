@@ -130,6 +130,67 @@
         <div class="mt-3 break-words text-sm font-medium text-amber-900 dark:text-amber-100">{{ rootCauseMessage }}</div>
       </div>
 
+      <div v-if="detail.request_payloads?.length" class="rounded-xl bg-gray-50 p-6 dark:bg-dark-900">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <h3 class="text-sm font-black uppercase tracking-wider text-gray-900 dark:text-white">{{ t('admin.ops.errorDetail.requestPayloads') }}</h3>
+          <span class="text-xs text-amber-700 dark:text-amber-300">{{ t('admin.ops.errorDetail.requestPayloadWarning') }}</span>
+        </div>
+        <div class="mt-4 space-y-3">
+          <div
+            v-for="payload in detail.request_payloads"
+            :key="payload.id"
+            class="rounded-lg border border-gray-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-800"
+          >
+            <div class="flex flex-wrap items-center justify-between gap-3">
+              <div class="min-w-0">
+                <div class="flex flex-wrap items-center gap-2">
+                  <span class="rounded-md bg-gray-100 px-2 py-0.5 font-mono text-xs font-bold uppercase text-gray-700 dark:bg-dark-700 dark:text-gray-200">{{ payload.kind }}</span>
+                  <span class="text-xs font-semibold text-gray-600 dark:text-gray-300">{{ formatPayloadBytes(payload.payload_bytes) }}</span>
+                </div>
+                <div class="mt-2 break-all font-mono text-[10px] text-gray-400">SHA-256: {{ payload.sha256 }}</div>
+              </div>
+              <button
+                type="button"
+                class="btn btn-secondary inline-flex items-center gap-2"
+                :disabled="downloadingPayloadIds.has(payload.id)"
+                @click="downloadPayload(payload)"
+              >
+                <Icon :name="downloadingPayloadIds.has(payload.id) ? 'refresh' : 'download'" size="sm" :class="downloadingPayloadIds.has(payload.id) ? 'animate-spin' : ''" />
+                {{ t('admin.ops.errorDetail.downloadRequestPayload') }}
+              </button>
+            </div>
+            <div v-if="payload.attempts?.length" class="mt-4 overflow-x-auto">
+              <table class="min-w-full text-left text-xs">
+                <thead class="text-gray-400">
+                  <tr>
+                    <th class="pr-4 font-semibold">#</th>
+                    <th class="pr-4 font-semibold">{{ t('admin.ops.errorDetail.payloadAttempt') }}</th>
+                    <th class="pr-4 font-semibold">{{ t('admin.ops.errorDetail.payloadAccount') }}</th>
+                    <th class="pr-4 font-semibold">conn_id</th>
+                    <th class="font-semibold">{{ t('admin.ops.errorDetail.payloadWriteResult') }}</th>
+                  </tr>
+                </thead>
+                <tbody class="text-gray-700 dark:text-gray-200">
+                  <tr v-for="attempt in payload.attempts" :key="attempt.sequence_no" class="border-t border-gray-100 dark:border-dark-700">
+                    <td class="py-2 pr-4 font-mono">{{ attempt.sequence_no }}</td>
+                    <td class="py-2 pr-4 font-mono">{{ attempt.attempt_no }}</td>
+                    <td class="py-2 pr-4 font-mono">{{ attempt.account_id ?? '—' }}</td>
+                    <td class="max-w-[240px] truncate py-2 pr-4 font-mono" :title="attempt.conn_id">{{ attempt.conn_id || '—' }}</td>
+                    <td class="py-2">
+                      <span :class="attempt.write_succeeded ? 'text-emerald-600' : 'text-red-600'">
+                        {{ attempt.write_succeeded ? t('admin.ops.errorDetail.payloadWriteSucceeded') : t('admin.ops.errorDetail.payloadWriteFailed') }}
+                      </span>
+                      <span class="ml-2 text-gray-400">{{ attempt.connection_reused ? t('admin.ops.errorDetail.payloadReused') : t('admin.ops.errorDetail.payloadNewConnection') }}</span>
+                      <div v-if="attempt.write_error" class="mt-1 break-all font-mono text-[10px] text-red-500">{{ attempt.write_error }}</div>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div class="rounded-xl bg-gray-50 p-6 dark:bg-dark-900">
         <h3 class="text-sm font-black uppercase tracking-wider text-gray-900 dark:text-white">{{ t('admin.ops.errorDetail.diagnosticPayloads') }}</h3>
         <div v-if="!diagnosticPayloadSections.length" class="mt-4 text-sm text-gray-500 dark:text-gray-400">{{ t('common.noData') }}</div>
@@ -230,7 +291,7 @@ import { useI18n } from 'vue-i18n'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import Icon from '@/components/icons/Icon.vue'
 import { useAppStore } from '@/stores'
-import { opsAPI, type OpsErrorDetail } from '@/api/admin/ops'
+import { opsAPI, type OpsErrorDetail, type OpsErrorPayloadMetadata } from '@/api/admin/ops'
 import { formatDateTime } from '@/utils/format'
 import { resolveUpstreamPayload } from '../utils/errorDetailResponse'
 
@@ -254,6 +315,7 @@ const appStore = useAppStore()
 
 const loading = ref(false)
 const detail = ref<OpsErrorDetail | null>(null)
+const downloadingPayloadIds = ref(new Set<number>())
 
 const showUpstreamList = computed(() => props.errorType === 'request')
 
@@ -386,6 +448,44 @@ function prettyJSON(raw?: string): string {
     return JSON.stringify(JSON.parse(raw), null, 2)
   } catch {
     return raw
+  }
+}
+
+function formatPayloadBytes(value: number): string {
+  if (!Number.isFinite(value) || value < 0) return '—'
+  if (value < 1024) return `${value} B`
+  const units = ['KiB', 'MiB', 'GiB']
+  let size = value / 1024
+  let unit = units[0]
+  for (let i = 1; i < units.length && size >= 1024; i += 1) {
+    size /= 1024
+    unit = units[i]
+  }
+  return `${size.toFixed(size >= 100 ? 0 : size >= 10 ? 1 : 2)} ${unit}`
+}
+
+async function downloadPayload(payload: OpsErrorPayloadMetadata) {
+  const errorId = props.errorId
+  if (!errorId || downloadingPayloadIds.value.has(payload.id)) return
+  const next = new Set(downloadingPayloadIds.value)
+  next.add(payload.id)
+  downloadingPayloadIds.value = next
+  try {
+    const blob = await opsAPI.downloadErrorPayload(errorId, payload.id)
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = `http2ws-error-${errorId}-${payload.kind}-${payload.id}.json`
+    document.body.appendChild(anchor)
+    anchor.click()
+    anchor.remove()
+    URL.revokeObjectURL(url)
+  } catch (err: any) {
+    appStore.showError(err?.message || t('admin.ops.errorDetail.payloadDownloadFailed'))
+  } finally {
+    const done = new Set(downloadingPayloadIds.value)
+    done.delete(payload.id)
+    downloadingPayloadIds.value = done
   }
 }
 

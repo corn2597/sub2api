@@ -29,6 +29,14 @@ func (m *opsRepoMock) BatchInsertErrorLogs(ctx context.Context, inputs []*OpsIns
 	return int64(len(inputs)), nil
 }
 
+func (m *opsRepoMock) InsertErrorPayloadCapture(context.Context, string, *OpsErrorPayloadCaptureSnapshot) error {
+	return nil
+}
+
+func (m *opsRepoMock) GetErrorPayloadContent(context.Context, int64, int64) (*OpsErrorPayloadContent, error) {
+	return nil, nil
+}
+
 func (m *opsRepoMock) ListErrorLogs(ctx context.Context, filter *OpsErrorLogFilter) (*OpsErrorLogList, error) {
 	return &OpsErrorLogList{Errors: []*OpsErrorLog{}, Page: 1, PageSize: 20}, nil
 }

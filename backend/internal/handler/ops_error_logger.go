@@ -63,6 +63,7 @@ const (
 
 const (
 	opsErrorLogTimeout      = 5 * time.Second
+	opsErrorPayloadTimeout  = 2 * time.Minute
 	opsErrorLogDrainTimeout = 10 * time.Second
 	opsErrorLogBatchWindow  = 200 * time.Millisecond
 
@@ -1104,9 +1105,6 @@ func OpsErrorLoggerMiddleware(ops *service.OpsService) gin.HandlerFunc {
 		if ops == nil {
 			return
 		}
-		if !ops.IsMonitoringEnabled(c.Request.Context()) {
-			return
-		}
 		if c.GetBool(opsDedicatedErrorRecordedKey) {
 			return
 		}
@@ -1114,6 +1112,7 @@ func OpsErrorLoggerMiddleware(ops *service.OpsService) gin.HandlerFunc {
 		if shouldSkipOpsErrorLogForCyber(c) {
 			return
 		}
+		monitoringEnabled := ops.IsMonitoringEnabled(c.Request.Context())
 
 		status := c.Writer.Status()
 		body := w.capturedBytes()
@@ -1131,12 +1130,21 @@ func OpsErrorLoggerMiddleware(ops *service.OpsService) gin.HandlerFunc {
 				// wire status is already 200. Otherwise retain recovered attempts as a
 				// provider-health row whose 2xx status keeps it outside request SLA.
 				if len(service.GetOpsStreamErrors(c)) > 0 {
-					logOpsStreamError(c, ops, status)
+					persistOpsErrorPayloadCapture(c, ops)
+					if monitoringEnabled {
+						logOpsStreamError(c, ops, status)
+					}
 				} else {
-					logOpsRecoveredUpstream(c, ops, status)
+					if monitoringEnabled {
+						logOpsRecoveredUpstream(c, ops, status)
+					}
 				}
 				return
 			}
+		}
+		persistOpsErrorPayloadCapture(c, ops)
+		if !monitoringEnabled {
+			return
 		}
 
 		// Skip logging if a passthrough rule with skip_monitoring=true matched.
@@ -1276,7 +1284,6 @@ func OpsErrorLoggerMiddleware(ops *service.OpsService) gin.HandlerFunc {
 			clientIP = ip
 			entry.ClientIP = &clientIP
 		}
-
 		enqueueOpsErrorLog(ops, entry)
 	}
 }
@@ -1567,8 +1574,28 @@ func logOpsStreamErrorValue(c *gin.Context, ops *service.OpsService, wireStatus 
 	if clientIP := strings.TrimSpace(ip.GetClientIP(c)); clientIP != "" {
 		entry.ClientIP = &clientIP
 	}
-
 	enqueueOpsErrorLog(ops, entry)
+}
+
+func persistOpsErrorPayloadCapture(c *gin.Context, ops *service.OpsService) {
+	if c == nil || c.Request == nil || ops == nil {
+		return
+	}
+	capture := service.TakeOpsErrorPayloadCapture(c)
+	if capture == nil {
+		return
+	}
+	requestID, _ := c.Request.Context().Value(ctxkey.RequestID).(string)
+	requestID = strings.TrimSpace(requestID)
+	if requestID == "" {
+		requestID = strings.TrimSpace(c.Writer.Header().Get("X-Request-Id"))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), opsErrorPayloadTimeout)
+	err := ops.RecordErrorPayloadCapture(ctx, requestID, capture)
+	cancel()
+	if err != nil {
+		log.Printf("[OpsErrorLogger] payload_capture_failed request_id=%q: %v", requestID, err)
+	}
 }
 
 func applyOpsStreamErrorSnapshot(entry *service.OpsInsertErrorLogInput, streamErr service.OpsStreamError) {

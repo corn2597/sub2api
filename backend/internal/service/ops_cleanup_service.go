@@ -19,10 +19,13 @@ import (
 )
 
 const (
-	opsCleanupJobName = "ops_cleanup"
+	opsCleanupJobName             = "ops_cleanup"
+	opsErrorPayloadCleanupJobName = "ops_error_payload_cleanup"
 
-	opsCleanupLeaderLockKeyDefault = "ops:cleanup:leader"
-	opsCleanupLeaderLockTTLDefault = 30 * time.Minute
+	opsCleanupLeaderLockKeyDefault      = "ops:cleanup:leader"
+	opsErrorPayloadCleanupLeaderLockKey = "ops:error_payload_cleanup:leader"
+	opsCleanupLeaderLockTTLDefault      = 30 * time.Minute
+	opsErrorPayloadCleanupSchedule      = "17 * * * *"
 )
 
 var opsCleanupCronParser = cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
@@ -83,13 +86,11 @@ func NewOpsCleanupService(
 	}
 }
 
-// Start 首次启动 cron 调度。Enabled / Schedule 由 effective 配置决定（settings 优先 cfg）。
+// Start 首次启动 cron 调度。通用运维清理的 Enabled / Schedule 由 effective 配置决定，
+// 完整错误 payload 使用独立的每小时调度。
 // 重复调用幂等。
 func (s *OpsCleanupService) Start() {
 	if s == nil {
-		return
-	}
-	if s.cfg != nil && !s.cfg.Ops.Enabled {
 		return
 	}
 	if s.opsRepo == nil || s.db == nil {
@@ -137,15 +138,11 @@ func (s *OpsCleanupService) stopCronLocked() {
 }
 
 // applyScheduleLocked 重新计算 effective 配置并按其 schedule 重建 cron。调用方持锁。
-// 若 effective.Enabled=false（用户在 UI 关闭清理），停旧 cron 后直接返回，不创建新 cron。
+// 即使 effective.Enabled=false（用户在 UI 关闭通用运维清理），仍保留 payload cron，
+// 因为完整请求 payload 的短期保留策略是独立的安全边界。
 func (s *OpsCleanupService) applyScheduleLocked(ctx context.Context) error {
 	s.computeEffectiveLocked(ctx)
 	s.stopCronLocked()
-
-	if !s.effective.Enabled {
-		logger.LegacyPrintf("service.ops_cleanup", "[OpsCleanup] cron disabled by settings")
-		return nil
-	}
 
 	schedule := strings.TrimSpace(s.effective.Schedule)
 	if schedule == "" {
@@ -160,17 +157,25 @@ func (s *OpsCleanupService) applyScheduleLocked(ctx context.Context) error {
 	}
 
 	c := cron.New(cron.WithParser(opsCleanupCronParser), cron.WithLocation(loc))
-	if _, err := c.AddFunc(schedule, func() { s.runScheduled() }); err != nil {
-		return fmt.Errorf("invalid schedule %q: %w", schedule, err)
+	if s.effective.Enabled {
+		if _, err := c.AddFunc(schedule, func() { s.runScheduled() }); err != nil {
+			return fmt.Errorf("invalid schedule %q: %w", schedule, err)
+		}
+	}
+	if _, err := c.AddFunc(opsErrorPayloadCleanupSchedule, func() { s.runErrorPayloadCleanupScheduled() }); err != nil {
+		return fmt.Errorf("invalid payload cleanup schedule %q: %w", opsErrorPayloadCleanupSchedule, err)
 	}
 	c.Start()
 	s.cron = c
 	logger.LegacyPrintf("service.ops_cleanup",
-		"[OpsCleanup] scheduled (schedule=%q tz=%s retention_days=err:%d/min:%d/hour:%d)",
+		"[OpsCleanup] scheduled (schedule=%q tz=%s metadata_cleanup_enabled=%v retention_days=err:%d/min:%d/hour:%d payload_schedule=%q payload_retention_hours=%d)",
 		schedule, loc.String(),
+		s.effective.Enabled,
 		s.effective.ErrorLogRetentionDays,
 		s.effective.MinuteMetricsRetentionDays,
 		s.effective.HourlyMetricsRetentionDays,
+		opsErrorPayloadCleanupSchedule,
+		s.errorPayloadRetentionHours(),
 	)
 	return nil
 }
@@ -267,6 +272,9 @@ func (s *OpsCleanupService) runScheduled() {
 
 	// 让 retention 改动当次生效（schedule/enabled 改动需要 Reload）。
 	s.refreshEffectiveBeforeRun(ctx)
+	if !s.snapshotEffective().Enabled {
+		return
+	}
 
 	release, ok := s.tryAcquireLeaderLock(ctx)
 	if !ok {
@@ -301,6 +309,9 @@ func (s *OpsCleanupService) runCleanupOnce(ctx context.Context) (opsCleanupDelet
 	effective := s.snapshotEffective()
 	now := time.Now().UTC()
 
+	if !effective.Enabled {
+		return out, nil
+	}
 	targets := []opsCleanupTarget{
 		{effective.ErrorLogRetentionDays, "ops_error_logs", "created_at", false, &out.errorLogs},
 		{effective.ErrorLogRetentionDays, "ops_ingress_reject_aggregates", "bucket_start", false, &out.ingressRejects},
@@ -336,7 +347,62 @@ func (s *OpsCleanupService) runCleanupOnce(ctx context.Context) (opsCleanupDelet
 	return out, nil
 }
 
+func (s *OpsCleanupService) runErrorPayloadCleanupScheduled() {
+	if s == nil || s.db == nil || s.opsRepo == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), opsCleanupRunTimeout)
+	defer cancel()
+	release, ok := s.tryAcquireLeaderLockWithKey(ctx, opsErrorPayloadCleanupLeaderLockKey)
+	if !ok {
+		return
+	}
+	if release != nil {
+		defer release()
+	}
+
+	startedAt := time.Now().UTC()
+	counts := opsCleanupDeletedCounts{}
+	deleted, err := s.runErrorPayloadCleanupOnce(ctx)
+	counts.errorPayloads = deleted
+	if err != nil {
+		s.recordHeartbeatErrorForJob(opsErrorPayloadCleanupJobName, startedAt, time.Since(startedAt), err)
+		logger.LegacyPrintf("service.ops_cleanup", "[OpsPayloadCleanup] cleanup failed: %v", err)
+		return
+	}
+	s.recordHeartbeatSuccessForJob(opsErrorPayloadCleanupJobName, startedAt, time.Since(startedAt), counts)
+}
+
+func (s *OpsCleanupService) runErrorPayloadCleanupOnce(ctx context.Context) (int64, error) {
+	if s == nil || s.db == nil {
+		return 0, nil
+	}
+	retentionHours := s.errorPayloadRetentionHours()
+	cutoff := time.Now().UTC().Add(-time.Duration(retentionHours) * time.Hour)
+	return opsCleanupRunOne(
+		ctx,
+		s.db,
+		false,
+		cutoff,
+		"ops_error_payload_blobs",
+		"created_at",
+		false,
+		opsCleanupBatchSize,
+	)
+}
+
+func (s *OpsCleanupService) errorPayloadRetentionHours() int {
+	if s != nil && s.cfg != nil && s.cfg.Gateway.OpenAIWS.ErrorPayloadRetentionHours > 0 {
+		return s.cfg.Gateway.OpenAIWS.ErrorPayloadRetentionHours
+	}
+	return 72
+}
+
 func (s *OpsCleanupService) tryAcquireLeaderLock(ctx context.Context) (func(), bool) {
+	return s.tryAcquireLeaderLockWithKey(ctx, opsCleanupLeaderLockKeyDefault)
+}
+
+func (s *OpsCleanupService) tryAcquireLeaderLockWithKey(ctx context.Context, key string) (func(), bool) {
 	if s == nil {
 		return nil, false
 	}
@@ -345,7 +411,9 @@ func (s *OpsCleanupService) tryAcquireLeaderLock(ctx context.Context) (func(), b
 		return nil, true
 	}
 
-	key := opsCleanupLeaderLockKeyDefault
+	if strings.TrimSpace(key) == "" {
+		key = opsCleanupLeaderLockKeyDefault
+	}
 	ttl := opsCleanupLeaderLockTTLDefault
 
 	// Prefer Redis leader lock when available, but avoid stampeding the DB when Redis is flaky by
@@ -378,6 +446,10 @@ func (s *OpsCleanupService) tryAcquireLeaderLock(ctx context.Context) (func(), b
 }
 
 func (s *OpsCleanupService) recordHeartbeatSuccess(runAt time.Time, duration time.Duration, counts opsCleanupDeletedCounts) {
+	s.recordHeartbeatSuccessForJob(opsCleanupJobName, runAt, duration, counts)
+}
+
+func (s *OpsCleanupService) recordHeartbeatSuccessForJob(jobName string, runAt time.Time, duration time.Duration, counts opsCleanupDeletedCounts) {
 	if s == nil || s.opsRepo == nil {
 		return
 	}
@@ -387,7 +459,7 @@ func (s *OpsCleanupService) recordHeartbeatSuccess(runAt time.Time, duration tim
 	ctx, cancel := context.WithTimeout(context.Background(), opsCleanupHeartbeatTimeout)
 	defer cancel()
 	_ = s.opsRepo.UpsertJobHeartbeat(ctx, &OpsUpsertJobHeartbeatInput{
-		JobName:        opsCleanupJobName,
+		JobName:        jobName,
 		LastRunAt:      &runAt,
 		LastSuccessAt:  &now,
 		LastDurationMs: &durMs,
@@ -396,6 +468,10 @@ func (s *OpsCleanupService) recordHeartbeatSuccess(runAt time.Time, duration tim
 }
 
 func (s *OpsCleanupService) recordHeartbeatError(runAt time.Time, duration time.Duration, err error) {
+	s.recordHeartbeatErrorForJob(opsCleanupJobName, runAt, duration, err)
+}
+
+func (s *OpsCleanupService) recordHeartbeatErrorForJob(jobName string, runAt time.Time, duration time.Duration, err error) {
 	if s == nil || s.opsRepo == nil || err == nil {
 		return
 	}
@@ -405,7 +481,7 @@ func (s *OpsCleanupService) recordHeartbeatError(runAt time.Time, duration time.
 	ctx, cancel := context.WithTimeout(context.Background(), opsCleanupHeartbeatTimeout)
 	defer cancel()
 	_ = s.opsRepo.UpsertJobHeartbeat(ctx, &OpsUpsertJobHeartbeatInput{
-		JobName:        opsCleanupJobName,
+		JobName:        jobName,
 		LastRunAt:      &runAt,
 		LastErrorAt:    &now,
 		LastError:      &msg,

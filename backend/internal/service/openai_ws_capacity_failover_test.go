@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -118,6 +119,79 @@ func TestForwardOpenAIWSV2CapacityBeforeSemanticOutputFailsOverWithoutClientByte
 	require.True(t, failoverErr.RequestScopedTransient)
 	require.False(t, failoverErr.ShouldReportAccountScheduleFailure())
 	require.Empty(t, recorder.Body.String())
+}
+
+func TestForwardOpenAIWSV2ErrorCaptureMatchesActualUpstreamFrame(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	upstreamFrame := make(chan []byte, 1)
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		_, payload, err := conn.ReadMessage()
+		if err != nil {
+			return
+		}
+		upstreamFrame <- bytes.Clone(payload)
+		_ = conn.WriteJSON(map[string]any{
+			"type": "error",
+			"error": map[string]any{
+				"code":    "invalid_request_error",
+				"message": "capture integration test",
+			},
+		})
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{}
+	cfg.Security.URLAllowlist.AllowInsecureHTTP = true
+	cfg.Gateway.OpenAIWS.Enabled = true
+	cfg.Gateway.OpenAIWS.APIKeyEnabled = true
+	cfg.Gateway.OpenAIWS.ResponsesWebsocketsV2 = true
+	cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 1
+	cfg.Gateway.OpenAIWS.MaxIdlePerAccount = 1
+	cfg.Gateway.OpenAIWS.QueueLimitPerConn = 1
+	cfg.Gateway.OpenAIWS.DialTimeoutSeconds = 2
+	cfg.Gateway.OpenAIWS.ReadTimeoutSeconds = 2
+	cfg.Gateway.OpenAIWS.WriteTimeoutSeconds = 2
+	svc := &OpenAIGatewayService{cfg: cfg, toolCorrector: NewCodexToolCorrector()}
+	defer func() {
+		if svc.openaiWSPool != nil {
+			svc.openaiWSPool.Close()
+		}
+	}()
+	account := &Account{
+		ID:          9010,
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
+		Schedulable: true,
+		Concurrency: 1,
+		Credentials: map[string]any{"api_key": "sk-test", "base_url": server.URL},
+	}
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	originalHTTP := []byte(`{"model":"gpt-5","stream":true,"input":"exact ingress"}`)
+	SetOpsHTTPErrorPayloadCandidate(c, originalHTTP)
+	MarkOpsErrorPayloadCaptureEnabled(c)
+
+	_, err := runOpenAIWSCapacityTestForward(t, svc, account, c, true)
+	require.Error(t, err)
+	actualFrame := <-upstreamFrame
+	capture := TakeOpsErrorPayloadCapture(c)
+	require.NotNil(t, capture)
+	require.Equal(t, originalHTTP, capture.HTTPPayload)
+	require.Len(t, capture.WSPayloads, 1)
+	require.Equal(t, actualFrame, capture.WSPayloads[opsPayloadSHA256(actualFrame)])
+	require.Len(t, capture.WSAttempts, 1)
+	require.Equal(t, 1, capture.WSAttempts[0].AttemptNo)
+	require.Equal(t, account.ID, capture.WSAttempts[0].AccountID)
+	require.True(t, capture.WSAttempts[0].WriteSucceeded)
+	require.NotEmpty(t, capture.WSAttempts[0].ConnID)
 }
 
 func TestForwardOpenAIWSV2CapacityAfterSemanticOutputSanitizesStream(t *testing.T) {

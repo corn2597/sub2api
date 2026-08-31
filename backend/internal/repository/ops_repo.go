@@ -594,6 +594,11 @@ LIMIT 1`
 	if out.UpstreamErrors == "null" {
 		out.UpstreamErrors = ""
 	}
+	payloads, err := r.listErrorPayloadMetadata(ctx, out.RequestID)
+	if err != nil {
+		return nil, err
+	}
+	out.RequestPayloads = payloads
 
 	return &out, nil
 }

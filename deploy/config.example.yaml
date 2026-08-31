@@ -390,6 +390,10 @@ gateway:
     retry_total_budget_ms: 5000
     # payload_schema 日志采样率（0-1）；降低热路径日志放大
     payload_log_sample_rate: 0.2
+    # 仅在 HTTP2WS 请求最终失败时保存完整 HTTP/WS 请求体；内容可能包含敏感用户数据，默认关闭。
+    error_payload_capture_enabled: false
+    # 完整错误请求体保留小时数；默认 72 小时。
+    error_payload_retention_hours: 72
     # 调度与粘连参数
     lb_top_k: 7
     sticky_session_ttl_seconds: 3600

@@ -107,6 +107,9 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	wsDecision := s.getOpenAIWSProtocolResolver().Resolve(account)
 	wsDecision = s.resolveOpenAIWSDecisionForRequest(c, account, body, wsDecision)
 	if GetOpenAIClientTransport(c) == OpenAIClientTransportHTTP && wsDecision.Transport == OpenAIUpstreamTransportResponsesWebsocketV2 {
+		if s.cfg != nil && s.cfg.Gateway.OpenAIWS.ErrorPayloadCaptureEnabled {
+			MarkOpsErrorPayloadCaptureEnabled(c)
+		}
 		if !PreserveFullOpsErrorDetails(c) {
 			MarkOpsPreserveFullErrorDetails(c)
 			AppendOpsRequestLifecycleEvent(c, OpsRequestLifecycleEvent{Event: "request_received", Outcome: "http_to_ws", AccountID: account.ID})

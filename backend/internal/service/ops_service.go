@@ -717,6 +717,44 @@ func (s *OpsService) GetErrorLogByID(ctx context.Context, id int64) (*OpsErrorLo
 	return detail, nil
 }
 
+func (s *OpsService) RecordErrorPayloadCapture(
+	ctx context.Context,
+	requestID string,
+	capture *OpsErrorPayloadCaptureSnapshot,
+) error {
+	if s == nil || s.cfg == nil || !s.cfg.Gateway.OpenAIWS.ErrorPayloadCaptureEnabled || capture == nil {
+		return nil
+	}
+	if s.opsRepo == nil {
+		return errors.New("ops repository is unavailable for error payload capture")
+	}
+	requestID = strings.TrimSpace(requestID)
+	if requestID == "" {
+		return errors.New("missing request id for error payload capture")
+	}
+	return s.opsRepo.InsertErrorPayloadCapture(ctx, requestID, capture)
+}
+
+func (s *OpsService) GetErrorPayloadContent(
+	ctx context.Context,
+	errorID, payloadID int64,
+) (*OpsErrorPayloadContent, error) {
+	if err := s.RequireMonitoringEnabled(ctx); err != nil {
+		return nil, err
+	}
+	if s.opsRepo == nil {
+		return nil, infraerrors.NotFound("OPS_ERROR_PAYLOAD_NOT_FOUND", "error payload not found")
+	}
+	payload, err := s.opsRepo.GetErrorPayloadContent(ctx, errorID, payloadID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, infraerrors.NotFound("OPS_ERROR_PAYLOAD_NOT_FOUND", "error payload not found")
+		}
+		return nil, infraerrors.InternalServer("OPS_ERROR_PAYLOAD_LOAD_FAILED", "Failed to load error payload").WithCause(err)
+	}
+	return payload, nil
+}
+
 // GetUserErrorRequestDetail 返回某用户自己某条错误请求的脱敏详情(含 error_body)。
 // 安全:强制按用户归属校验;非本人记录一律返回 NotFound(不泄露存在性)。
 func (s *OpsService) GetUserErrorRequestDetail(ctx context.Context, userID, id int64) (*UserErrorRequestDetail, error) {

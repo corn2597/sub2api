@@ -13,7 +13,7 @@ import {
 import { fetchWithProxy, proxyForBun } from "./proxy"
 import { buildOAuthForm } from "./oauth"
 import { diagnoseWebSocketHandshake } from "./websocket-handshake-diagnostic"
-import { sendWebSocketMessageFragmented } from "./websocket-fragmented-send"
+import { sendWebSocketMessage } from "./websocket-fragmented-send"
 
 const OPENCODE_VERSION = process.env.OPENCODE_VERSION ?? "1.18.20"
 const bind = process.env.SUB2API_EGRESS_BIND ?? "127.0.0.1"
@@ -40,7 +40,7 @@ const deviceUserAgent = `opencode/${OPENCODE_VERSION}`
 const protocolVersion = "3"
 const auditEnabled = /^(1|true|yes)$/i.test(process.env.SUB2API_EGRESS_AUDIT_LOG ?? "")
 const auditPayloadLimit = 4 * 1024 * 1024
-const metrics = { http: 0, websocket: 0, oauth: 0, fragmentedMessages: 0, fingerprintViolations: 0 }
+const metrics = { http: 0, websocket: 0, oauth: 0, largeMessages: 0, fingerprintViolations: 0 }
 
 if (!sharedSecret) {
   throw new Error("SUB2API_EGRESS_SECRET is required")
@@ -302,7 +302,7 @@ const server = Bun.serve<SocketData>({
           outbound_http_total: metrics.http,
           outbound_websocket_total: metrics.websocket,
           outbound_oauth_total: metrics.oauth,
-          outbound_fragmented_message_total: metrics.fragmentedMessages,
+          outbound_large_message_total: metrics.largeMessages,
           fingerprint_violation_total: metrics.fingerprintViolations,
         })
       }
@@ -351,10 +351,10 @@ const server = Bun.serve<SocketData>({
       auditOutboundMessageIdentity(message)
       const payloadBytes = typeof message === "string" ? Buffer.byteLength(message) : message.byteLength
       if (payloadBytes > wsFragmentBytes) {
-        metrics.fragmentedMessages++
-        auditFragmentedMessage(payloadBytes)
+        metrics.largeMessages++
+        auditLargeMessage(payloadBytes)
       }
-      sendWebSocketMessageFragmented(upstream, message, typeof message !== "string", wsFragmentBytes, (error?: Error) => {
+      sendWebSocketMessage(upstream, message, typeof message !== "string", (error?: Error) => {
         data.sending = false
         if (error && socket.readyState === WebSocket.OPEN) socket.close(1011, "upstream websocket write failed")
       })
@@ -535,13 +535,12 @@ function auditOutboundMessageIdentity(message: string | Buffer) {
   }))
 }
 
-function auditFragmentedMessage(payloadBytes: number) {
+function auditLargeMessage(payloadBytes: number) {
   if (!auditEnabled) return
   console.log(JSON.stringify({
-    event: "opencode_egress_fragmented_message",
+    event: "opencode_egress_large_message",
     payload_bytes: payloadBytes,
-    fragment_bytes: wsFragmentBytes,
-    frame_count: Math.ceil(payloadBytes / wsFragmentBytes),
+    message_count: 1,
   }))
 }
 

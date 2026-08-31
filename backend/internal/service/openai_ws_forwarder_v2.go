@@ -408,16 +408,27 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		return nil, err
 	}
 
-	if err := lease.WriteJSONWithContextTimeout(ctx, payload, s.openAIWSWriteTimeout()); err != nil {
+	payloadJSON := payloadAsJSONBytes(payload)
+	captureSequence := BeginOpsErrorWSPayloadAttempt(
+		c,
+		payloadJSON,
+		attempt,
+		account.ID,
+		connID,
+		lease.Reused(),
+	)
+	writeErr := lease.WriteJSONWithContextTimeout(ctx, json.RawMessage(payloadJSON), s.openAIWSWriteTimeout())
+	FinishOpsErrorWSPayloadAttempt(c, captureSequence, writeErr)
+	if writeErr != nil {
 		lease.MarkBroken()
 		logOpenAIWSModeInfo(
 			"write_request_fail account_id=%d conn_id=%s cause=%s payload_bytes=%d",
 			account.ID,
 			connID,
-			truncateOpenAIWSLogValue(err.Error(), openAIWSLogValueMaxLen),
+			truncateOpenAIWSLogValue(writeErr.Error(), openAIWSLogValueMaxLen),
 			resolvePayloadBytes(),
 		)
-		return nil, wrapOpenAIWSFallback("write_request", err)
+		return nil, wrapOpenAIWSFallback("write_request", writeErr)
 	}
 	AppendOpsRequestLifecycleEvent(c, OpsRequestLifecycleEvent{Event: "request_sent", Outcome: "response.create", AccountID: account.ID, ConnID: connID, Attempt: attempt})
 	if debugEnabled {
@@ -696,6 +707,7 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 				s.handleOpenAIWSErrorEventTransientFailure(ctx, account, mappedModel, lease.HandshakeHeaders(), message)
 			}
 			errCodeRaw, errTypeRaw, errMsgRaw := parseOpenAIWSErrorEventFields(message)
+			requestScopedError := isOpenAIWSRequestScopedErrorEvent(message, errCodeRaw, errTypeRaw)
 			s.persistOpenAIWSRateLimitSignal(ctx, account, lease.HandshakeHeaders(), message, errCodeRaw, errTypeRaw, errMsgRaw)
 			errMsg := strings.TrimSpace(errMsgRaw)
 			if errMsg == "" {
@@ -740,9 +752,10 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 					errMessage,
 				)
 			}
-			// A non-capacity error is conservatively connection-scoped. Capacity
-			// errors are explicitly request-scoped and keep this lease reusable.
-			if !capacityShed {
+			// Request-scoped errors (for example invalid_request_error) leave a
+			// healthy pooled connection reusable. Only transport/connection-level
+			// errors should evict the lease.
+			if !capacityShed && !requestScopedError {
 				lease.MarkBroken()
 			}
 			if capacityShed && !wroteDownstream && !semanticOutputSeen {
@@ -789,12 +802,16 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 			if !reqStream {
 				c.JSON(statusCode, gin.H{
 					"error": gin.H{
-						"type":    "upstream_error",
+						"type":    errType,
+						"code":    errCode,
 						"message": errMsg,
 					},
 				})
 			}
-			return nil, fmt.Errorf("openai ws error event: %s", errMsg)
+			// The upstream error event has already been written (JSON for a
+			// non-stream request, SSE event for a stream). The stable prefix tells
+			// the handler not to append a generic 502 fallback response.
+			return nil, fmt.Errorf("upstream response failed: %s", errMsg)
 		}
 
 		if capacityShed && eventType == "response.failed" {
