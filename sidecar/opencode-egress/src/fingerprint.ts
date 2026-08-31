@@ -83,9 +83,33 @@ function normalizeHeaders(input: HeaderInput | undefined, allowed: Set<string>) 
   for (const [key, raw] of Object.entries(input)) {
     const lower = key.toLowerCase()
     if (hopByHopHeaders.has(lower) || !allowed.has(lower)) continue
-    for (const value of Array.isArray(raw) ? raw : [raw]) result.append(key, String(value))
+    for (const value of Array.isArray(raw) ? raw : [raw]) {
+      const normalized = lower === "x-codex-turn-metadata"
+        ? normalizeTurnMetadataHeader(String(value))
+        : String(value)
+      if (normalized !== undefined) result.append(key, normalized)
+    }
   }
   return result
+}
+
+function normalizeTurnMetadataHeader(raw: string): string | undefined {
+  const value = raw.trim()
+  if (!value) return undefined
+  if (isASCIIHTTPHeaderValue(value)) return value
+  // OpenAI's Codex endpoint rejects non-ASCII turn metadata even when it is
+  // represented as JSON unicode escapes. The Go layer omits the same value
+  // from the outbound WS payload; this is a defensive sidecar guard.
+  return undefined
+}
+
+function isASCIIHTTPHeaderValue(value: string) {
+  for (const codePoint of value) {
+    const code = codePoint.codePointAt(0) ?? 0
+    if (code === 0x09 || (code >= 0x20 && code <= 0x7e)) continue
+    return false
+  }
+  return true
 }
 
 function validOpenCodeSession(input: HeaderInput | undefined, names: string[]) {

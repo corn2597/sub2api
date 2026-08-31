@@ -25,6 +25,32 @@ func validateOpenAIWSBearerToken(account *Account, token string) error {
 	return nil
 }
 
+// normalizeOpenAIWSTurnMetadataHeader returns only values safe for an HTTP
+// WebSocket handshake. OpenAI's Codex endpoint rejects non-ASCII turn metadata
+// even when it is represented as JSON unicode escapes, so unsafe metadata is
+// omitted from both the handshake and the outbound WS payload.
+func normalizeOpenAIWSTurnMetadataHeader(raw string) string {
+	metadata := strings.TrimSpace(raw)
+	if metadata == "" {
+		return ""
+	}
+	if isASCIIHTTPHeaderValue(metadata) {
+		return metadata
+	}
+
+	return ""
+}
+
+func isASCIIHTTPHeaderValue(value string) bool {
+	for i := 0; i < len(value); i++ {
+		if value[i] == '\t' || (value[i] >= 0x20 && value[i] <= 0x7e) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 func (s *OpenAIGatewayService) buildOpenAIResponsesWSURL(account *Account) (string, error) {
 	if account == nil {
 		return "", errors.New("account is nil")
@@ -138,7 +164,9 @@ func (s *OpenAIGatewayService) buildOpenAIWSHeaders(
 		headers.Set(openAIWSTurnStateHeader, state)
 	}
 	if metadata := strings.TrimSpace(turnMetadata); metadata != "" {
-		headers.Set(openAIWSTurnMetadataHeader, metadata)
+		if normalized := normalizeOpenAIWSTurnMetadataHeader(metadata); normalized != "" {
+			headers.Set(openAIWSTurnMetadataHeader, normalized)
+		}
 	}
 	applyCodexAccountIdentityHeaders(headers, codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c))
 	applyStagedCodexFingerprintHeaders(c, account, headers)
@@ -218,7 +246,7 @@ func setOpenAIWSTurnMetadata(payload map[string]any, turnMetadata string) {
 	if len(payload) == 0 {
 		return
 	}
-	metadata := strings.TrimSpace(turnMetadata)
+	metadata := normalizeOpenAIWSTurnMetadataHeader(turnMetadata)
 	if metadata == "" {
 		return
 	}

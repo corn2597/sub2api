@@ -74,6 +74,21 @@ describe("OpenCode outbound fingerprint", () => {
     expect(headers.get("openai-beta")).toBe("responses_websockets=2026-02-06")
   })
 
+  test("drops Unicode turn metadata rejected by the upstream endpoint", () => {
+    const raw = JSON.stringify({
+      workspace_kind: "project",
+      workspaces: { "/Users/demo/语音记账": "changed" },
+      label: "😀",
+    })
+    const headers = normalizeModelWebSocketHeaders({ "x-codex-turn-metadata": raw })
+    expect(headers.get("x-codex-turn-metadata")).toBeNull()
+  })
+
+  test("drops unsafe opaque turn metadata instead of aborting the handshake", () => {
+    const headers = normalizeModelWebSocketHeaders({ "x-codex-turn-metadata": "turn-元数据" })
+    expect(headers.get("x-codex-turn-metadata")).toBeNull()
+  })
+
   test("management requests use the same OpenCode identity allowlist", () => {
     const headers = normalizeManagementHeaders({
       authorization: "Bearer token",
