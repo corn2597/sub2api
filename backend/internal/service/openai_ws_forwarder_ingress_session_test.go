@@ -243,7 +243,7 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_KeepLeaseAcrossT
 	require.Len(t, captureConn.writes, 2, "应向同一上游连接发送两轮 response.create")
 }
 
-func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_CapacityRetriesBeforeSemanticOutput(t *testing.T) {
+func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_CapacityReturnsToClientWithoutReplay(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	firstConn := &openAIWSCaptureConn{events: [][]byte{
@@ -260,20 +260,20 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_CapacityRetriesB
 	defer func() { _ = clientConn.CloseNow() }()
 
 	writeOpenAIWSIngressTestMessage(t, clientConn, `{"type":"response.create","model":"gpt-5.1","stream":false,"store":false}`)
-	created := readOpenAIWSIngressTestMessage(t, clientConn)
-	completed := readOpenAIWSIngressTestMessage(t, clientConn)
-	require.Equal(t, "response.created", gjson.GetBytes(created, "type").String())
-	require.Equal(t, "resp_capacity_ok", gjson.GetBytes(created, "response.id").String())
-	require.NotContains(t, string(created), "resp_capacity_discarded")
-	require.Equal(t, "response.completed", gjson.GetBytes(completed, "type").String())
-	require.Equal(t, "resp_capacity_ok", gjson.GetBytes(completed, "response.id").String())
+	failed := readOpenAIWSIngressTestMessage(t, clientConn)
+	require.Equal(t, "error", gjson.GetBytes(failed, "type").String())
+	require.Equal(t, "server_error", gjson.GetBytes(failed, "error.code").String())
+	require.NotContains(t, string(failed), "server_is_overloaded")
 	require.Equal(t, 1, dialer.DialCount(), "请求级 overloaded 应复用同一条上游连接")
-	require.Len(t, firstConn.writes, 2)
+	require.Len(t, firstConn.writes, 1)
 
 	_ = clientConn.Close(coderws.StatusNormalClosure, "done")
 	select {
 	case serverErr := <-serverErrCh:
-		require.NoError(t, serverErr)
+		var failoverErr *UpstreamFailoverError
+		require.ErrorAs(t, serverErr, &failoverErr)
+		require.True(t, failoverErr.ClientResponseWritten)
+		require.Equal(t, NextAccountStop, failoverErr.NextAccountAction)
 	case <-time.After(3 * time.Second):
 		t.Fatal("等待 ingress websocket 结束超时")
 	}
@@ -339,8 +339,8 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_LaterSelfContain
 
 	writeOpenAIWSIngressTestMessage(t, clientConn, `{"type":"response.create","model":"gpt-5.1","stream":false,"store":false,"input":"turn two"}`)
 	sanitized := readOpenAIWSIngressTestMessage(t, clientConn)
-	require.Equal(t, "response.failed", gjson.GetBytes(sanitized, "type").String())
-	require.Equal(t, "server_error", gjson.GetBytes(sanitized, "response.error.code").String())
+	require.Equal(t, "error", gjson.GetBytes(sanitized, "type").String())
+	require.Equal(t, "server_error", gjson.GetBytes(sanitized, "error.code").String())
 	require.NotContains(t, string(sanitized), "server_is_overloaded")
 	select {
 	case serverErr := <-serverErrCh:
@@ -355,7 +355,7 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_LaterSelfContain
 	case <-time.After(4 * time.Second):
 		t.Fatal("等待 later-turn capacity failover 超时")
 	}
-	require.Equal(t, 2, dialer.DialCount())
+	require.Equal(t, 1, dialer.DialCount())
 }
 
 func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_StateBoundCapacitySanitizesWithoutCrossAccountReplay(t *testing.T) {
@@ -396,7 +396,7 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_StateBoundCapaci
 	case <-time.After(4 * time.Second):
 		t.Fatal("等待 state-bound capacity 终止超时")
 	}
-	require.Equal(t, 2, dialer.DialCount())
+	require.Equal(t, 1, dialer.DialCount())
 }
 
 func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_FirstTurnStateBoundCapacityStopsAfterSameAccountRetries(t *testing.T) {
@@ -429,7 +429,7 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_FirstTurnStateBo
 	case <-time.After(4 * time.Second):
 		t.Fatal("等待 first-turn state-bound capacity 终止超时")
 	}
-	require.Equal(t, 2, dialer.DialCount())
+	require.Equal(t, 1, dialer.DialCount())
 }
 
 func newOpenAIWSIngressCapacityTestService(

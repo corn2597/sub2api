@@ -134,7 +134,7 @@ func TestOpenAIWSHTTPBridgeCapacityAfterSemanticOutputSanitizesWithoutFailover(t
 	require.NotContains(t, string(clientMessages[2]), "server_is_overloaded")
 }
 
-func TestOpenAIWSHTTPBridgeCapacityRetriesSameAccountBeforeClientOutput(t *testing.T) {
+func TestOpenAIWSHTTPBridgeCapacityReturnsToClientWithoutReplay(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	cfg := &config.Config{}
 	cfg.Security.URLAllowlist.Enabled = false
@@ -200,19 +200,22 @@ func TestOpenAIWSHTTPBridgeCapacityRetriesSameAccountBeforeClientOutput(t *testi
 	clientConn, serverErrCh := startOpenAIWSIngressTestClient(t, svc, account)
 	defer func() { _ = clientConn.CloseNow() }()
 	writeOpenAIWSIngressTestMessage(t, clientConn, `{"type":"response.create","model":"gpt-5.1","stream":false,"store":false,"input":"hello"}`)
-	created := readOpenAIWSIngressTestMessage(t, clientConn)
-	completed := readOpenAIWSIngressTestMessage(t, clientConn)
-	require.Equal(t, "resp-http-bridge-retry-ok", gjson.GetBytes(created, "response.id").String())
-	require.NotContains(t, string(created), "resp-http-bridge-retry-discarded")
-	require.Equal(t, "response.completed", gjson.GetBytes(completed, "type").String())
-	require.Equal(t, 2, upstream.callCount)
+	failed := readOpenAIWSIngressTestMessage(t, clientConn)
+	require.Equal(t, "error", gjson.GetBytes(failed, "type").String())
+	require.Equal(t, "server_error", gjson.GetBytes(failed, "error.code").String())
+	require.NotContains(t, string(failed), "server_is_overloaded")
+	require.Equal(t, 1, upstream.callCount)
 
 	_ = clientConn.Close(coderws.StatusNormalClosure, "done")
 	select {
 	case serverErr := <-serverErrCh:
-		require.NoError(t, serverErr)
+		var failoverErr *UpstreamFailoverError
+		require.ErrorAs(t, serverErr, &failoverErr)
+		require.True(t, failoverErr.RequestScopedTransient)
+		require.True(t, failoverErr.ClientResponseWritten)
+		require.Equal(t, NextAccountStop, failoverErr.NextAccountAction)
 	case <-time.After(4 * time.Second):
-		t.Fatal("等待 http_bridge capacity retry 会话结束超时")
+		t.Fatal("等待 http_bridge capacity 会话结束超时")
 	}
 }
 
@@ -285,5 +288,5 @@ func TestOpenAIWSHTTPBridgeCapacityExhaustionStopsWithoutCrossAccountFailover(t 
 	case <-time.After(4 * time.Second):
 		t.Fatal("等待 http_bridge capacity exhaustion 超时")
 	}
-	require.Equal(t, 2, upstream.callCount)
+	require.Equal(t, 1, upstream.callCount)
 }

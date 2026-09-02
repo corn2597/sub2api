@@ -660,7 +660,6 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			}
 			var result *OpenAIForwardResult
 			var bridgeErr error
-			capacityRetry := 0
 			for {
 				result, bridgeErr = s.proxyOpenAIWSHTTPBridgeTurn(
 					ctx,
@@ -681,29 +680,9 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				if !errors.As(bridgeErr, &capacityErr) || !capacityErr.RequestScopedTransient {
 					break
 				}
-				retryLimit := account.GetPoolModeRetryCount()
-				if capacityRetry < retryLimit {
-					capacityRetry++
-					delay := openAIWSCapacityRetryDelay(capacityRetry)
-					logOpenAIWSModeInfo(
-						"ingress_ws_capacity_same_account_retry account_id=%d turn=%d retry=%d retry_limit=%d delay_ms=%d path=http_bridge",
-						account.ID,
-						turn,
-						capacityRetry,
-						retryLimit,
-						delay.Milliseconds(),
-					)
-					timer := time.NewTimer(delay)
-					select {
-					case <-ctx.Done():
-						if !timer.Stop() {
-							<-timer.C
-						}
-						return ctx.Err()
-					case <-timer.C:
-					}
-					continue
-				}
+				// HTTP→WS capacity shedding is request-scoped. Replaying the full
+				// HTTP payload on the same account would amplify upstream load; stop
+				// here and let the HTTP client retry the request.
 				capacityErr.RetryableOnSameAccount = false
 				capacityErr.NextAccountAction = NextAccountStop
 				if !capacityErr.ClientResponseWritten {
@@ -1382,7 +1361,6 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	turn := 1
 	rejectedFieldRetryState = newOpenAIResponsesRejectedFieldRetryState(currentPayload)
 	turnRetry := 0
-	turnCapacityRetry := 0
 	turnPrevRecoveryTried := false
 	lastTurnFinishedAt := time.Time{}
 	lastTurnResponseID := ""
@@ -1817,33 +1795,8 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			lastTurnClean = false
 			var capacityErr *UpstreamFailoverError
 			if errors.As(relayErr, &capacityErr) && capacityErr.RequestScopedTransient {
-				retryLimit := account.GetPoolModeRetryCount()
-				if turnCapacityRetry < retryLimit {
-					turnCapacityRetry++
-					delay := openAIWSCapacityRetryDelay(turnCapacityRetry)
-					logOpenAIWSModeInfo(
-						"ingress_ws_capacity_same_account_retry account_id=%d turn=%d retry=%d retry_limit=%d delay_ms=%d conn_id=%s",
-						account.ID,
-						turn,
-						turnCapacityRetry,
-						retryLimit,
-						delay.Milliseconds(),
-						truncateOpenAIWSLogValue(connID, openAIWSIDValueMaxLen),
-					)
-					// Keep the current healthy lease held. The next attempt must be
-					// sent on the same WS before considering a same-account rebuild.
-					skipBeforeTurn = true
-					timer := time.NewTimer(delay)
-					select {
-					case <-ctx.Done():
-						if !timer.Stop() {
-							<-timer.C
-						}
-						return ctx.Err()
-					case <-timer.C:
-					}
-					continue
-				}
+				// Capacity shedding is request-scoped. Do not replay the turn on
+				// the same WS or switch accounts; return the event once.
 				capacityErr.RetryableOnSameAccount = false
 				capacityErr.NextAccountAction = NextAccountStop
 				if !capacityErr.ClientResponseWritten {
@@ -1889,7 +1842,6 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			return finalErr
 		}
 		turnRetry = 0
-		turnCapacityRetry = 0
 		turnPrevRecoveryTried = false
 		lastTurnFinishedAt = time.Now()
 		lastTurnClean = true
