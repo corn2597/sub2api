@@ -1136,7 +1136,9 @@ func TestOpenAIGatewayServiceForwardImages_OAuth429CarriesSameAccountRetryWindow
 	var failoverErr *UpstreamFailoverError
 	require.ErrorAs(t, err, &failoverErr)
 	require.True(t, failoverErr.RetryableOnSameAccount)
-	require.Equal(t, time.Second, failoverErr.SameAccountRetryDelay)
+	// OAuth 429 retries use a 5s minimum floor even when the provider sends
+	// a shorter Retry-After value, reducing request pressure during bursts.
+	require.Equal(t, openAIOAuth429RetryDelay, failoverErr.SameAccountRetryDelay)
 	require.WithinDuration(t, startedAt.Add(openAIOAuth429RetryWindow), failoverErr.SameAccountRetryDeadline, time.Second)
 }
 

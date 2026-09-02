@@ -781,6 +781,24 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 					if failoverErr.ShouldReportAccountScheduleFailure() {
 						h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, forwardModel, requireCompact, nil), false, nil, err)
 					}
+					// Capacity shedding is request-scoped: retrying the same request
+					// against another account does not remove the overloaded condition,
+					// and replaying it across the pool only amplifies load.  Return a
+					// client-retryable server_error instead of doing an internal retry
+					// or account switch.
+					if failoverErr.RequestScopedTransient {
+						failoverErr.RetryableOnSameAccount = false
+						failoverErr.NextAccountAction = service.NextAccountStop
+						service.AppendOpsRequestLifecycleEvent(c, service.OpsRequestLifecycleEvent{
+							Event:     "capacity_shed_returned_to_client",
+							Outcome:   "client_retry",
+							Scope:     "request",
+							Reason:    string(failoverErr.Reason),
+							AccountID: account.ID,
+						})
+						h.handleFailoverExhausted(c, failoverErr, streamStarted)
+						return
+					}
 					if !failoverErr.ShouldRetryNextAccount() {
 						h.handleFailoverExhausted(c, failoverErr, streamStarted)
 						return
