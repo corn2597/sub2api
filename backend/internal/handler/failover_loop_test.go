@@ -97,6 +97,31 @@ func TestSameAccountRetryAllowedHonorsErrorMaxBeforeDeadline(t *testing.T) {
 	require.False(t, sameAccountRetryAllowed(err, 0, 0), "an explicit zero retry budget remains disabled")
 }
 
+func TestSameAccountRetryAllowedDisablesOpenAICapacityShed(t *testing.T) {
+	err := &service.UpstreamFailoverError{
+		RetryableOnSameAccount:   true,
+		RequestScopedTransient:   true,
+		SameAccountRetryDeadline: time.Now().Add(time.Minute),
+		SameAccountRetryMax:      3,
+		ResponseBody:             []byte(`{"error":{"code":"server_is_overloaded"}}`),
+	}
+
+	// The overload retry budget is effectively zero even when the account has
+	// a positive pool retry limit and the error has its own retry deadline.
+	require.False(t, sameAccountRetryAllowed(err, 0, maxSameAccountRetries))
+}
+
+func TestSameAccountRetryAllowedKeepsNonCapacityRequestScopedRetry(t *testing.T) {
+	err := &service.UpstreamFailoverError{
+		RetryableOnSameAccount: true,
+		RequestScopedTransient: true,
+	}
+
+	// RequestScopedTransient also covers non-capacity transient policies; they
+	// retain the existing same-account retry behavior.
+	require.True(t, sameAccountRetryAllowed(err, 0, maxSameAccountRetries))
+}
+
 func TestSameAccountRetryDeadlineAllows(t *testing.T) {
 	require.True(t, sameAccountRetryDeadlineAllows(&service.UpstreamFailoverError{}))
 	require.True(t, sameAccountRetryDeadlineAllows(&service.UpstreamFailoverError{
@@ -455,6 +480,25 @@ func TestHandleFailoverError_CacheBilling(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestHandleFailoverError_SameAccountRetry(t *testing.T) {
+	t.Run("OpenAI降载错误不做同账号重试而切换账号", func(t *testing.T) {
+		mock := &mockTempUnscheduler{}
+		fs := NewFailoverState(3, false)
+		err := &service.UpstreamFailoverError{
+			StatusCode:             http.StatusServiceUnavailable,
+			RetryableOnSameAccount: true,
+			RequestScopedTransient: true,
+			ResponseBody:           []byte(`{"error":{"code":"server_is_overloaded"}}`),
+		}
+
+		action := fs.HandleFailoverError(context.Background(), mock, 100, "openai", maxSameAccountRetries, err)
+
+		require.Equal(t, FailoverContinue, action)
+		require.Zero(t, fs.SameAccountRetryCount[100])
+		require.Equal(t, 1, fs.SwitchCount)
+		require.Contains(t, fs.FailedAccountIDs, int64(100))
+		require.Len(t, mock.calls, 1, "降载不应重试同账号，而应走既有耗尽后的 failover 路径")
+	})
+
 	t.Run("第一次重试返回FailoverContinue", func(t *testing.T) {
 		mock := &mockTempUnscheduler{}
 		fs := NewFailoverState(3, false)
