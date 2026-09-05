@@ -80,6 +80,12 @@ func sameAccountRetryAllowed(failoverErr *service.UpstreamFailoverError, retryCo
 	if failoverErr == nil || !failoverErr.RetryableOnSameAccount {
 		return false
 	}
+	// OpenAI capacity shedding is request-scoped and retrying the same
+	// credential repeats the same provider-side overload. Keep the normal
+	// failover path so another account can still be selected.
+	if failoverErr.IsOpenAICapacityShed() {
+		return false
+	}
 	if !sameAccountRetryDeadlineAllows(failoverErr) {
 		return false
 	}
