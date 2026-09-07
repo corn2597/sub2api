@@ -154,7 +154,7 @@ ORDER BY CASE payload_kind WHEN 'http' THEN 0 ELSE 1 END, id`, requestID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	items := make([]*service.OpsErrorPayloadMetadata, 0, 4)
 	byID := make(map[int64]*service.OpsErrorPayloadMetadata)
@@ -182,7 +182,7 @@ ORDER BY sequence_no`, requestID)
 	if err != nil {
 		return nil, err
 	}
-	defer attemptRows.Close()
+	defer func() { _ = attemptRows.Close() }()
 	for attemptRows.Next() {
 		var payloadID int64
 		var accountID sql.NullInt64

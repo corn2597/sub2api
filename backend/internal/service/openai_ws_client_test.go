@@ -146,7 +146,7 @@ func TestCoderOpenAIWSClientDialer_EgressReadyAndFragmentedMessage(t *testing.T)
 	mux.HandleFunc("/proxy/ws", func(w http.ResponseWriter, r *http.Request) {
 		ws, err := coderws.Accept(w, r, nil)
 		require.NoError(t, err)
-		defer ws.CloseNow()
+		defer func() { _ = ws.CloseNow() }()
 		ws.SetReadLimit(openAIWSEgressWireMessageLimit(256 << 20))
 		ready, _ := json.Marshal(map[string]any{
 			"type": "sub2api.egress.ready", "protocol": "3",
@@ -176,7 +176,7 @@ func TestCoderOpenAIWSClientDialer_EgressReadyAndFragmentedMessage(t *testing.T)
 	require.NoError(t, err)
 	require.Zero(t, status)
 	require.Equal(t, "turn-state", headers.Get("x-codex-turn-state"))
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	value := map[string]any{"type": "response.create", "input": strings.Repeat("x", 3<<20)}
 	require.NoError(t, conn.WriteJSON(context.Background(), value))
@@ -214,7 +214,7 @@ func TestCoderOpenAIWSClientDialer_EgressLargeCompleteMessage(t *testing.T) {
 	mux.HandleFunc("/proxy/ws", func(w http.ResponseWriter, r *http.Request) {
 		ws, err := coderws.Accept(w, r, nil)
 		require.NoError(t, err)
-		defer ws.CloseNow()
+		defer func() { _ = ws.CloseNow() }()
 		ws.SetReadLimit(openAIWSEgressWireMessageLimit(256 << 20))
 		ready, _ := json.Marshal(map[string]any{"type": "sub2api.egress.ready", "protocol": "3"})
 		require.NoError(t, ws.Write(r.Context(), coderws.MessageText, ready))
@@ -236,7 +236,7 @@ func TestCoderOpenAIWSClientDialer_EgressLargeCompleteMessage(t *testing.T) {
 	dialer := newConfiguredOpenAIWSClientDialer(cfg)
 	conn, _, _, err := dialer.Dial(context.Background(), "wss://chatgpt.com/backend-api/codex/responses", nil, "")
 	require.NoError(t, err)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	value := struct {
 		Input string `json:"input"`
@@ -275,7 +275,7 @@ func TestCoderOpenAIWSClientDialer_EgressHandshakeErrorRestoresStatus(t *testing
 	mux.HandleFunc("/proxy/ws", func(w http.ResponseWriter, r *http.Request) {
 		ws, err := coderws.Accept(w, r, nil)
 		require.NoError(t, err)
-		defer ws.CloseNow()
+		defer func() { _ = ws.CloseNow() }()
 		payload, _ := json.Marshal(map[string]any{
 			"type": "sub2api.egress.handshake_error", "protocol": "3", "status": 429,
 			"headers":     map[string][]string{"retry-after": {"7"}},

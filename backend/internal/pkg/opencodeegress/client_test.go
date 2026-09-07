@@ -50,7 +50,7 @@ func TestClientProxyHTTPStreamsRawBodyAndMetadata(t *testing.T) {
 		"model",
 	)
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusAccepted, resp.StatusCode)
 	require.Empty(t, resp.Header.Get(ProtocolHeader))
 }

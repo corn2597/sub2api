@@ -153,7 +153,7 @@ func (c *Client) CallJSON(ctx context.Context, path string, payload any) (int, [
 	if err != nil {
 		return 0, nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return resp.StatusCode, nil, err
@@ -172,7 +172,7 @@ func (c *Client) Health(ctx context.Context) (*Health, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("sidecar health returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))

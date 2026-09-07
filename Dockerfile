@@ -14,7 +14,6 @@ ARG POSTGRES_IMAGE=postgres:18-alpine
 ARG GOPROXY=https://goproxy.cn,direct
 ARG GOSUMDB=sum.golang.google.cn
 ARG NPM_CONFIG_REGISTRY=
-ARG BUILDPLATFORM
 
 # -----------------------------------------------------------------------------
 # Stage 1: Frontend Builder
