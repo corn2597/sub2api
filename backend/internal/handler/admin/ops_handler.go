@@ -45,6 +45,37 @@ func (h *OpsHandler) GetErrorLogByID(c *gin.Context) {
 	response.Success(c, detail)
 }
 
+// DownloadErrorPayload returns exact, untruncated request bytes for an ops
+// error. This route is registered only below the administrator route group.
+// GET /api/v1/admin/ops/errors/:id/payloads/:payload_id
+func (h *OpsHandler) DownloadErrorPayload(c *gin.Context) {
+	if h.opsService == nil {
+		response.Error(c, http.StatusServiceUnavailable, "Ops service not available")
+		return
+	}
+	errorID, err := strconv.ParseInt(strings.TrimSpace(c.Param("id")), 10, 64)
+	if err != nil || errorID <= 0 {
+		response.BadRequest(c, "Invalid error id")
+		return
+	}
+	payloadID, err := strconv.ParseInt(strings.TrimSpace(c.Param("payload_id")), 10, 64)
+	if err != nil || payloadID <= 0 {
+		response.BadRequest(c, "Invalid payload id")
+		return
+	}
+	payload, err := h.opsService.GetErrorPayloadContent(c.Request.Context(), errorID, payloadID)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	filename := fmt.Sprintf("http2ws-error-%d-%s-%d.json", errorID, payload.Kind, payload.ID)
+	c.Header("Cache-Control", "no-store")
+	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
+	c.Header("X-Content-SHA256", payload.SHA256)
+	c.Header("X-Original-Content-Length", strconv.FormatInt(payload.PayloadBytes, 10))
+	c.Data(http.StatusOK, "application/json; charset=utf-8", payload.Data)
+}
+
 const (
 	opsListViewErrors   = "errors"
 	opsListViewExcluded = "excluded"

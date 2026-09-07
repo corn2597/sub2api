@@ -885,6 +885,46 @@
         </div>
       </div>
 
+      <div v-if="allOpenAIOAuthOnly" class="border-t border-gray-200 pt-4 dark:border-dark-600">
+        <div class="mb-3 flex items-center justify-between">
+          <label
+            id="bulk-edit-openai-http-to-ws-label"
+            class="input-label mb-0"
+            for="bulk-edit-openai-http-to-ws-enabled"
+          >
+            {{ t('admin.accounts.openai.httpToWS') }}
+          </label>
+          <input
+            v-model="enableOpenAIHTTPToWS"
+            id="bulk-edit-openai-http-to-ws-enabled"
+            type="checkbox"
+            class="rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+          />
+        </div>
+        <div :class="!enableOpenAIHTTPToWS && 'pointer-events-none opacity-50'">
+          <p class="mb-3 text-xs text-gray-500 dark:text-gray-400">
+            {{ t('admin.accounts.openai.httpToWSDesc') }}
+          </p>
+          <button
+            id="bulk-edit-openai-http-to-ws-toggle"
+            type="button"
+            :aria-pressed="openaiOAuthHTTPToWSEnabled"
+            @click="openaiOAuthHTTPToWSEnabled = !openaiOAuthHTTPToWSEnabled"
+            :class="[
+              'relative inline-flex h-6 w-11 rounded-full border-2 border-transparent transition-colors focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2',
+              openaiOAuthHTTPToWSEnabled ? 'bg-primary-600' : 'bg-gray-200 dark:bg-dark-600'
+            ]"
+          >
+            <span
+              :class="[
+                'pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow transition',
+                openaiOAuthHTTPToWSEnabled ? 'translate-x-5' : 'translate-x-0'
+              ]"
+            />
+          </button>
+        </div>
+      </div>
+
       <!-- OpenAI OAuth Codex CLI only -->
       <div v-if="allOpenAIOAuth" class="border-t border-gray-200 pt-4 dark:border-dark-600">
         <div class="mb-3 flex items-center justify-between">
@@ -989,6 +1029,18 @@
             {{ t('admin.accounts.openai.codexFingerprintModeDesc') }}
           </p>
           <Select v-model="codexFingerprintMode" data-testid="bulk-codex-fingerprint-mode-select" :options="codexFingerprintModeOptions" />
+        </div>
+        <div class="mt-3 flex items-center justify-between gap-4" :class="codexFingerprintMode !== 'device' && 'opacity-50'">
+          <label class="input-label mb-0">{{ t('admin.accounts.openai.codexFingerprintSeedCount') }}</label>
+          <input
+            v-model.number="codexFingerprintSeedCount"
+            data-testid="bulk-codex-fingerprint-seed-count"
+            type="number"
+            min="1"
+            max="16"
+            class="input w-28"
+            :disabled="!enableCodexFingerprintMode || codexFingerprintMode !== 'device'"
+          />
         </div>
       </div>
 
@@ -1663,6 +1715,7 @@ const enableOpenAILongContextBilling = ref(false)
 const enableOpenAIEndpointCapabilities = ref(false)
 const enableOpenAIResponsesMode = ref(false)
 const enableOpenAIWSMode = ref(false)
+const enableOpenAIHTTPToWS = ref(false)
 const enableOpenAIAPIKeyWSMode = ref(false)
 const enableUpstreamBillingAutoProbe = ref(false)
 const enableCodexCLIOnly = ref(false)
@@ -1702,6 +1755,7 @@ const openAIEndpointCapabilities = ref<OpenAIEndpointCapability[]>([
 ])
 const openAIResponsesMode = ref<OpenAIResponsesMode>('auto')
 const openaiOAuthResponsesWebSocketV2Mode = ref<OpenAIWSMode>(OPENAI_WS_MODE_OFF)
+const openaiOAuthHTTPToWSEnabled = ref(false)
 const openaiAPIKeyResponsesWebSocketV2Mode = ref<OpenAIWSMode>(OPENAI_WS_MODE_OFF)
 const upstreamBillingAutoProbeMode = ref<'enabled' | 'disabled'>('enabled')
 const codexCLIOnlyEnabled = ref(false)
@@ -1709,6 +1763,7 @@ const codexCLIOnlyAppServerEnabled = ref(false)
 type CodexFingerprintMode = 'off' | 'device' | 'session' | 'full'
 const enableCodexFingerprintMode = ref(false)
 const codexFingerprintMode = ref<CodexFingerprintMode>('off')
+const codexFingerprintSeedCount = ref(3)
 const codexFingerprintModeOptions = computed(() => [
   { value: 'off' as CodexFingerprintMode, label: t('admin.accounts.openai.codexFingerprintOff') },
   { value: 'device' as CodexFingerprintMode, label: t('admin.accounts.openai.codexFingerprintDevice') },
@@ -2060,6 +2115,11 @@ const buildUpdatePayload = (): Record<string, unknown> | null => {
     )
   }
 
+  if (enableOpenAIHTTPToWS.value && allOpenAIOAuthOnly.value) {
+    const extra = ensureExtra()
+    extra.openai_oauth_http_to_ws_enabled = openaiOAuthHTTPToWSEnabled.value
+  }
+
   if (enableOpenAIAPIKeyWSMode.value) {
     const extra = ensureExtra()
     extra.openai_apikey_responses_websockets_v2_mode = openaiAPIKeyResponsesWebSocketV2Mode.value
@@ -2107,6 +2167,16 @@ const buildUpdatePayload = (): Record<string, unknown> | null => {
     // 与本函数里其它"关闭/清除"字段的写法一致：codex_cli_only 直接落 false，
     // load_factor 落 0，proxy_id 落 0 —— 批量路径一律用显式哨兵值，不用省略。
     extra.codex_fingerprint_mode = codexFingerprintMode.value
+    if (codexFingerprintMode.value === 'device') {
+      extra.codex_fingerprint_seed_count = Math.min(
+        16,
+        Math.max(1, Number(codexFingerprintSeedCount.value) || 3)
+      )
+    } else {
+      // 批量更新是 JSONB 顶层合并，delete 只会让本次请求不更新旧值。
+      // 显式 null 才能清除旧的 device seed count；非 device 模式读取侧忽略该值。
+      extra.codex_fingerprint_seed_count = null
+    }
   }
 
   if (enableOpenAICompactMode.value) {
@@ -2218,6 +2288,7 @@ const handleSubmit = async () => {
     enableStatus.value ||
     enableGroups.value ||
     enableOpenAIWSMode.value ||
+    enableOpenAIHTTPToWS.value ||
     enableOpenAIAPIKeyWSMode.value ||
     enableUpstreamBillingAutoProbe.value ||
     enableCodexCLIOnly.value ||
@@ -2369,12 +2440,14 @@ watch(
       enableOpenAIEndpointCapabilities.value = false
       enableOpenAIResponsesMode.value = false
       enableOpenAIWSMode.value = false
+      enableOpenAIHTTPToWS.value = false
       enableOpenAIAPIKeyWSMode.value = false
       enableUpstreamBillingAutoProbe.value = false
       enableCodexCLIOnly.value = false
       enableCodexCLIOnlyAppServer.value = false
       enableCodexFingerprintMode.value = false
       codexFingerprintMode.value = 'off'
+      codexFingerprintSeedCount.value = 3
       enableOpenAICompactMode.value = false
       enableOpenAICompactModelMapping.value = false
       enableRpmLimit.value = false
@@ -2402,6 +2475,7 @@ watch(
       status.value = 'active'
       groupIds.value = []
       openaiOAuthResponsesWebSocketV2Mode.value = OPENAI_WS_MODE_OFF
+      openaiOAuthHTTPToWSEnabled.value = false
       openaiAPIKeyResponsesWebSocketV2Mode.value = OPENAI_WS_MODE_OFF
       upstreamBillingAutoProbeMode.value = 'enabled'
       codexCLIOnlyEnabled.value = false

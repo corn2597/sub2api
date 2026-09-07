@@ -243,6 +243,295 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_KeepLeaseAcrossT
 	require.Len(t, captureConn.writes, 2, "应向同一上游连接发送两轮 response.create")
 }
 
+func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_CapacityReturnsToClientWithoutReplay(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	firstConn := &openAIWSCaptureConn{events: [][]byte{
+		[]byte(`{"type":"response.created","response":{"id":"resp_capacity_discarded"}}`),
+		[]byte(`{"type":"error","error":{"message":"The servers are currently overloaded"}}`),
+		[]byte(`{"type":"response.created","response":{"id":"resp_capacity_ok"}}`),
+		[]byte(`{"type":"response.completed","response":{"id":"resp_capacity_ok","model":"gpt-5.1","usage":{"input_tokens":1,"output_tokens":1}}}`),
+	}}
+	dialer := &openAIWSQueueDialer{conns: []openAIWSClientConn{firstConn}}
+	svc, pool, account := newOpenAIWSIngressCapacityTestService(t, dialer, 1)
+	defer pool.Close()
+
+	clientConn, serverErrCh := startOpenAIWSIngressTestClient(t, svc, account)
+	defer func() { _ = clientConn.CloseNow() }()
+
+	writeOpenAIWSIngressTestMessage(t, clientConn, `{"type":"response.create","model":"gpt-5.1","stream":false,"store":false}`)
+	failed := readOpenAIWSIngressTestMessage(t, clientConn)
+	require.Equal(t, "error", gjson.GetBytes(failed, "type").String())
+	require.Equal(t, "server_error", gjson.GetBytes(failed, "error.code").String())
+	require.NotContains(t, string(failed), "server_is_overloaded")
+	require.Equal(t, 1, dialer.DialCount(), "请求级 overloaded 应复用同一条上游连接")
+	require.Len(t, firstConn.writes, 1)
+
+	_ = clientConn.Close(coderws.StatusNormalClosure, "done")
+	select {
+	case serverErr := <-serverErrCh:
+		var failoverErr *UpstreamFailoverError
+		require.ErrorAs(t, serverErr, &failoverErr)
+		require.True(t, failoverErr.ClientResponseWritten)
+		require.Equal(t, NextAccountStop, failoverErr.NextAccountAction)
+	case <-time.After(3 * time.Second):
+		t.Fatal("等待 ingress websocket 结束超时")
+	}
+}
+
+func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_CapacityAfterSemanticOutputDoesNotRetry(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	upstreamConn := &openAIWSCaptureConn{events: [][]byte{
+		[]byte(`{"type":"response.created","response":{"id":"resp_capacity_partial"}}`),
+		[]byte(`{"type":"response.output_text.delta","response_id":"resp_capacity_partial","delta":"partial"}`),
+		[]byte(`{"type":"response.failed","response":{"id":"resp_capacity_partial","status":"failed","error":{"code":"server_is_overloaded","message":"The server is overloaded"}}}`),
+	}}
+	dialer := &openAIWSQueueDialer{conns: []openAIWSClientConn{upstreamConn}}
+	svc, pool, account := newOpenAIWSIngressCapacityTestService(t, dialer, 1)
+	defer pool.Close()
+
+	clientConn, serverErrCh := startOpenAIWSIngressTestClient(t, svc, account)
+	defer func() { _ = clientConn.CloseNow() }()
+
+	writeOpenAIWSIngressTestMessage(t, clientConn, `{"type":"response.create","model":"gpt-5.1","stream":true,"store":false}`)
+	created := readOpenAIWSIngressTestMessage(t, clientConn)
+	delta := readOpenAIWSIngressTestMessage(t, clientConn)
+	failed := readOpenAIWSIngressTestMessage(t, clientConn)
+	require.Equal(t, "response.created", gjson.GetBytes(created, "type").String())
+	require.Equal(t, "partial", gjson.GetBytes(delta, "delta").String())
+	require.Equal(t, "response.failed", gjson.GetBytes(failed, "type").String())
+	require.Equal(t, "server_error", gjson.GetBytes(failed, "response.error.code").String())
+	require.NotContains(t, string(failed), "server_is_overloaded")
+	require.Equal(t, 1, dialer.DialCount(), "已有语义输出后不得重放请求")
+	require.Len(t, upstreamConn.writes, 1)
+
+	_ = clientConn.Close(coderws.StatusNormalClosure, "done")
+	select {
+	case serverErr := <-serverErrCh:
+		require.NoError(t, serverErr)
+	case <-time.After(3 * time.Second):
+		t.Fatal("等待 ingress websocket 结束超时")
+	}
+}
+
+func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_LaterSelfContainedCapacityStopsAfterSameAccountRetries(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	firstConn := &openAIWSCaptureConn{events: [][]byte{
+		[]byte(`{"type":"response.completed","response":{"id":"resp_turn_1","model":"gpt-5.1","usage":{"input_tokens":1,"output_tokens":1}}}`),
+		[]byte(`{"type":"response.created","response":{"id":"resp_turn_2_discarded_1"}}`),
+		[]byte(`{"type":"error","error":{"code":"server_is_overloaded","message":"overloaded"}}`),
+	}}
+	secondConn := &openAIWSCaptureConn{events: [][]byte{
+		[]byte(`{"type":"response.created","response":{"id":"resp_turn_2_discarded_2"}}`),
+		[]byte(`{"type":"response.failed","response":{"error":{"message":"The servers are currently overloaded"}}}`),
+	}}
+	dialer := &openAIWSQueueDialer{conns: []openAIWSClientConn{firstConn, secondConn}}
+	svc, pool, account := newOpenAIWSIngressCapacityTestService(t, dialer, 1)
+	defer pool.Close()
+
+	clientConn, serverErrCh := startOpenAIWSIngressTestClient(t, svc, account)
+	defer func() { _ = clientConn.CloseNow() }()
+	writeOpenAIWSIngressTestMessage(t, clientConn, `{"type":"response.create","model":"gpt-5.1","stream":false,"store":false,"input":"turn one"}`)
+	completed := readOpenAIWSIngressTestMessage(t, clientConn)
+	require.Equal(t, "resp_turn_1", gjson.GetBytes(completed, "response.id").String())
+
+	writeOpenAIWSIngressTestMessage(t, clientConn, `{"type":"response.create","model":"gpt-5.1","stream":false,"store":false,"input":"turn two"}`)
+	sanitized := readOpenAIWSIngressTestMessage(t, clientConn)
+	require.Equal(t, "error", gjson.GetBytes(sanitized, "type").String())
+	require.Equal(t, "server_error", gjson.GetBytes(sanitized, "error.code").String())
+	require.NotContains(t, string(sanitized), "server_is_overloaded")
+	select {
+	case serverErr := <-serverErrCh:
+		var failoverErr *UpstreamFailoverError
+		require.ErrorAs(t, serverErr, &failoverErr)
+		require.True(t, failoverErr.RequestScopedTransient)
+		require.False(t, failoverErr.RetryableOnSameAccount)
+		require.True(t, failoverErr.ClientResponseWritten)
+		require.Equal(t, NextAccountStop, failoverErr.NextAccountAction)
+		require.False(t, failoverErr.ShouldRetryNextAccount())
+		require.Empty(t, failoverErr.ReplayRequestBody)
+	case <-time.After(4 * time.Second):
+		t.Fatal("等待 later-turn capacity failover 超时")
+	}
+	require.Equal(t, 1, dialer.DialCount())
+}
+
+func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_StateBoundCapacitySanitizesWithoutCrossAccountReplay(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	firstConn := &openAIWSCaptureConn{events: [][]byte{
+		[]byte(`{"type":"response.completed","response":{"id":"resp_bound_turn_1","model":"gpt-5.1","usage":{"input_tokens":1,"output_tokens":1}}}`),
+		[]byte(`{"type":"response.created","response":{"id":"resp_bound_discarded_1"}}`),
+		[]byte(`{"type":"error","error":{"code":"server_is_overloaded","message":"overloaded"}}`),
+	}}
+	secondConn := &openAIWSCaptureConn{events: [][]byte{
+		[]byte(`{"type":"response.created","response":{"id":"resp_bound_discarded_2"}}`),
+		[]byte(`{"type":"error","error":{"code":"server_is_overloaded","message":"overloaded"}}`),
+	}}
+	dialer := &openAIWSQueueDialer{conns: []openAIWSClientConn{firstConn, secondConn}}
+	svc, pool, account := newOpenAIWSIngressCapacityTestService(t, dialer, 1)
+	defer pool.Close()
+
+	clientConn, serverErrCh := startOpenAIWSIngressTestClient(t, svc, account)
+	defer func() { _ = clientConn.CloseNow() }()
+	writeOpenAIWSIngressTestMessage(t, clientConn, `{"type":"response.create","model":"gpt-5.1","stream":false,"store":true,"input":"turn one"}`)
+	completed := readOpenAIWSIngressTestMessage(t, clientConn)
+	require.Equal(t, "resp_bound_turn_1", gjson.GetBytes(completed, "response.id").String())
+
+	writeOpenAIWSIngressTestMessage(t, clientConn, `{"type":"response.create","model":"gpt-5.1","stream":false,"store":true,"previous_response_id":"resp_bound_turn_1","input":"turn two"}`)
+	sanitized := readOpenAIWSIngressTestMessage(t, clientConn)
+	require.Equal(t, "error", gjson.GetBytes(sanitized, "type").String())
+	require.Equal(t, "server_error", gjson.GetBytes(sanitized, "error.code").String())
+	require.NotContains(t, string(sanitized), "server_is_overloaded")
+	select {
+	case serverErr := <-serverErrCh:
+		require.Error(t, serverErr)
+		var failoverErr *UpstreamFailoverError
+		require.ErrorAs(t, serverErr, &failoverErr)
+		require.True(t, failoverErr.ClientResponseWritten)
+		require.False(t, failoverErr.ShouldRetryNextAccount(), "依赖旧 response_id 的 turn 不得请求跨账号重放")
+		require.Empty(t, failoverErr.ReplayRequestBody)
+	case <-time.After(4 * time.Second):
+		t.Fatal("等待 state-bound capacity 终止超时")
+	}
+	require.Equal(t, 1, dialer.DialCount())
+}
+
+func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_FirstTurnStateBoundCapacityStopsAfterSameAccountRetries(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	firstConn := &openAIWSCaptureConn{events: [][]byte{
+		[]byte(`{"type":"response.created","response":{"id":"resp_discarded_1"}}`),
+		[]byte(`{"type":"error","error":{"code":"server_is_overloaded","message":"overloaded"}}`),
+	}}
+	secondConn := &openAIWSCaptureConn{events: [][]byte{
+		[]byte(`{"type":"response.created","response":{"id":"resp_discarded_2"}}`),
+		[]byte(`{"type":"error","error":{"code":"server_is_overloaded","message":"overloaded"}}`),
+	}}
+	dialer := &openAIWSQueueDialer{conns: []openAIWSClientConn{firstConn, secondConn}}
+	svc, pool, account := newOpenAIWSIngressCapacityTestService(t, dialer, 1)
+	defer pool.Close()
+	clientConn, serverErrCh := startOpenAIWSIngressTestClient(t, svc, account)
+	defer func() { _ = clientConn.CloseNow() }()
+	writeOpenAIWSIngressTestMessage(t, clientConn, `{"type":"response.create","model":"gpt-5.1","stream":false,"store":true,"previous_response_id":"resp_existing","input":"continue"}`)
+	sanitized := readOpenAIWSIngressTestMessage(t, clientConn)
+	require.Equal(t, "error", gjson.GetBytes(sanitized, "type").String())
+	require.Equal(t, "server_error", gjson.GetBytes(sanitized, "error.code").String())
+	select {
+	case serverErr := <-serverErrCh:
+		var failoverErr *UpstreamFailoverError
+		require.ErrorAs(t, serverErr, &failoverErr)
+		require.True(t, failoverErr.ClientResponseWritten)
+		require.Equal(t, NextAccountStop, failoverErr.NextAccountAction)
+		require.False(t, failoverErr.ShouldRetryNextAccount())
+		require.Empty(t, failoverErr.ReplayRequestBody)
+	case <-time.After(4 * time.Second):
+		t.Fatal("等待 first-turn state-bound capacity 终止超时")
+	}
+	require.Equal(t, 1, dialer.DialCount())
+}
+
+func newOpenAIWSIngressCapacityTestService(
+	t *testing.T,
+	dialer openAIWSClientDialer,
+	retryCount int,
+) (*OpenAIGatewayService, *openAIWSConnPool, *Account) {
+	t.Helper()
+	cfg := &config.Config{}
+	cfg.Security.URLAllowlist.Enabled = false
+	cfg.Security.URLAllowlist.AllowInsecureHTTP = true
+	cfg.Gateway.OpenAIWS.Enabled = true
+	cfg.Gateway.OpenAIWS.APIKeyEnabled = true
+	cfg.Gateway.OpenAIWS.ResponsesWebsocketsV2 = true
+	cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 1
+	cfg.Gateway.OpenAIWS.MaxIdlePerAccount = 1
+	cfg.Gateway.OpenAIWS.QueueLimitPerConn = 8
+	cfg.Gateway.OpenAIWS.DialTimeoutSeconds = 3
+	cfg.Gateway.OpenAIWS.ReadTimeoutSeconds = 3
+	cfg.Gateway.OpenAIWS.WriteTimeoutSeconds = 3
+
+	pool := newOpenAIWSConnPool(cfg)
+	pool.setClientDialerForTest(dialer)
+	svc := &OpenAIGatewayService{
+		cfg:              cfg,
+		httpUpstream:     &httpUpstreamRecorder{},
+		cache:            &stubGatewayCache{},
+		openaiWSResolver: NewOpenAIWSProtocolResolver(cfg),
+		toolCorrector:    NewCodexToolCorrector(),
+		openaiWSPool:     pool,
+	}
+	account := &Account{
+		ID:          119,
+		Name:        "openai-ingress-capacity",
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
+		Schedulable: true,
+		Concurrency: 1,
+		Credentials: map[string]any{
+			"api_key":               "sk-test",
+			"pool_mode":             true,
+			"pool_mode_retry_count": retryCount,
+		},
+		Extra: map[string]any{"responses_websockets_v2_enabled": true},
+	}
+	return svc, pool, account
+}
+
+func startOpenAIWSIngressTestClient(
+	t *testing.T,
+	svc *OpenAIGatewayService,
+	account *Account,
+) (*coderws.Conn, <-chan error) {
+	t.Helper()
+	serverErrCh := make(chan error, 1)
+	wsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := coderws.Accept(w, r, &coderws.AcceptOptions{CompressionMode: coderws.CompressionContextTakeover})
+		if err != nil {
+			serverErrCh <- err
+			return
+		}
+		defer func() { _ = conn.CloseNow() }()
+
+		readCtx, cancelRead := context.WithTimeout(r.Context(), 3*time.Second)
+		_, firstMessage, readErr := conn.Read(readCtx)
+		cancelRead()
+		if readErr != nil {
+			serverErrCh <- readErr
+			return
+		}
+		rec := httptest.NewRecorder()
+		ginCtx, _ := gin.CreateTestContext(rec)
+		ginCtx.Request = r.Clone(r.Context())
+		serverErrCh <- svc.ProxyResponsesWebSocketFromClient(r.Context(), ginCtx, conn, account, "sk-test", firstMessage, nil)
+	}))
+	t.Cleanup(wsServer.Close)
+
+	dialCtx, cancelDial := context.WithTimeout(context.Background(), 3*time.Second)
+	clientConn, _, err := coderws.Dial(dialCtx, "ws"+strings.TrimPrefix(wsServer.URL, "http"), nil)
+	cancelDial()
+	require.NoError(t, err)
+	return clientConn, serverErrCh
+}
+
+func writeOpenAIWSIngressTestMessage(t *testing.T, conn *coderws.Conn, payload string) {
+	t.Helper()
+	writeCtx, cancelWrite := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancelWrite()
+	require.NoError(t, conn.Write(writeCtx, coderws.MessageText, []byte(payload)))
+}
+
+func readOpenAIWSIngressTestMessage(t *testing.T, conn *coderws.Conn) []byte {
+	t.Helper()
+	readCtx, cancelRead := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancelRead()
+	msgType, message, err := conn.Read(readCtx)
+	require.NoError(t, err)
+	require.Equal(t, coderws.MessageText, msgType)
+	return message
+}
+
 func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_LeaseLossSendsRetryClose(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

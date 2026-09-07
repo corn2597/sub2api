@@ -99,6 +99,38 @@ type OpsErrorLogDetail struct {
 
 	// Bound (non-deleted) key prefix, snapshotted at error time.
 	APIKeyPrefix string `json:"api_key_prefix,omitempty"`
+
+	// RequestPayloads contains metadata only. Complete bytes are returned by the
+	// administrator-only download endpoint and never embedded in list/detail JSON.
+	RequestPayloads []*OpsErrorPayloadMetadata `json:"request_payloads,omitempty"`
+}
+
+type OpsErrorPayloadMetadata struct {
+	ID           int64                             `json:"id"`
+	Kind         string                            `json:"kind"`
+	SHA256       string                            `json:"sha256"`
+	PayloadBytes int64                             `json:"payload_bytes"`
+	CreatedAt    time.Time                         `json:"created_at"`
+	Attempts     []*OpsErrorPayloadAttemptMetadata `json:"attempts,omitempty"`
+}
+
+type OpsErrorPayloadAttemptMetadata struct {
+	SequenceNo       int       `json:"sequence_no"`
+	AttemptNo        int       `json:"attempt_no"`
+	AccountID        *int64    `json:"account_id,omitempty"`
+	ConnID           string    `json:"conn_id,omitempty"`
+	ConnectionReused bool      `json:"connection_reused"`
+	WriteSucceeded   bool      `json:"write_succeeded"`
+	WriteError       string    `json:"write_error,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
+}
+
+type OpsErrorPayloadContent struct {
+	ID           int64
+	Kind         string
+	SHA256       string
+	PayloadBytes int64
+	Data         []byte
 }
 
 type OpsErrorLogFilter struct {

@@ -698,6 +698,18 @@ type UpstreamFailoverError struct {
 	NextAccountAction        NextAccountAction
 	ClientStatusCode         int
 	ClientMessage            string
+	// ReplayRequestBody is set only for a direct Responses WebSocket turn that
+	// is self-contained and safe to replay on another account. It must contain
+	// the original client frame before account-specific mapping or mutation.
+	ReplayRequestBody []byte
+	ReplayTurn        int
+	// UpstreamEventBody preserves a direct-WS event for client-side sanitizing
+	// after all safe retries are exhausted. ResponseBody remains the normalized
+	// HTTP/gateway error used by handler failover paths.
+	UpstreamEventBody []byte
+	// ClientResponseWritten means the service already emitted the terminal
+	// client error and the handler must not retry or append another response.
+	ClientResponseWritten bool
 }
 
 func (e *UpstreamFailoverError) Error() string {
@@ -720,6 +732,9 @@ func (e *UpstreamFailoverError) IsCredentialFailure() bool {
 // and inference failures retain their existing scheduler-health behavior.
 func (e *UpstreamFailoverError) ShouldReportAccountScheduleFailure() bool {
 	if e == nil {
+		return false
+	}
+	if e.RequestScopedTransient {
 		return false
 	}
 	return !e.IsCredentialFailure() || e.Scope == GatewayFailureScopeAccount

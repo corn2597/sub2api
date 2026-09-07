@@ -1,6 +1,30 @@
 package service
 
-import "net/http"
+import (
+	"net/http"
+
+	"github.com/Wei-Shaw/sub2api/internal/config"
+)
+
+// openCodeSidecarOwnsOpenAIHTTP reports whether the configured OpenCode
+// sidecar is the authoritative final egress for OpenAI HTTP requests. The
+// generic OAuth transport plugin must not short-circuit this path: doing so
+// would make the same account use two different outbound identities.
+func openCodeSidecarOwnsOpenAIHTTP(cfg *config.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	settings := cfg.OpenAIEgressSnapshot()
+	return settings.Enabled && settings.HTTPEnabled
+}
+
+func openCodeSidecarOwnsOpenAIWS(cfg *config.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	settings := cfg.OpenAIEgressSnapshot()
+	return settings.Enabled && settings.WSEnabled
+}
 
 func (s *OpenAIGatewayService) SetPluginManager(manager *PluginManager) {
 	s.pluginManager = manager
@@ -9,7 +33,7 @@ func (s *OpenAIGatewayService) SetPluginManager(manager *PluginManager) {
 // doOpenAIUpstream 只在 OpenAI OAuth 能力绑定已启用时把真实请求交给插件。
 // 插件返回标准 http.Response，响应解析、错误映射、SSE 和计费仍由现有核心链处理。
 func (s *OpenAIGatewayService) doOpenAIUpstream(request *http.Request, proxyURL string, account *Account) (*http.Response, error) {
-	if s.pluginManager != nil {
+	if s.pluginManager != nil && !openCodeSidecarOwnsOpenAIHTTP(s.cfg) {
 		response, handled, err := s.pluginManager.RoundTripOpenAIOAuth(request.Context(), request, proxyURL, account)
 		if handled {
 			return response, err
@@ -26,7 +50,7 @@ func (s *AccountTestService) doOpenAIAccountTestUpstream(
 	account *Account,
 	useTLSFallback bool,
 ) (*http.Response, error) {
-	if s.pluginManager != nil {
+	if s.pluginManager != nil && !openCodeSidecarOwnsOpenAIHTTP(s.cfg) {
 		response, handled, err := s.pluginManager.RoundTripOpenAIOAuth(request.Context(), request, proxyURL, account)
 		if handled {
 			return response, err

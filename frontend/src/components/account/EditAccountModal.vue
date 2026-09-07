@@ -1647,6 +1647,37 @@
         </div>
       </div>
 
+      <div
+        v-if="account?.platform === 'openai' && account?.type === 'oauth'"
+        class="border-t border-gray-200 pt-4 dark:border-dark-600"
+      >
+        <div class="flex items-center justify-between gap-4">
+          <div>
+            <label class="input-label mb-0">{{ t('admin.accounts.openai.httpToWS') }}</label>
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              {{ t('admin.accounts.openai.httpToWSDesc') }}
+            </p>
+          </div>
+          <button
+            type="button"
+            data-testid="edit-openai-http-to-ws-toggle"
+            :aria-pressed="openaiOAuthHTTPToWSEnabled"
+            @click="openaiOAuthHTTPToWSEnabled = !openaiOAuthHTTPToWSEnabled"
+            :class="[
+              'relative inline-flex h-6 w-11 flex-shrink-0 rounded-full border-2 border-transparent transition-colors focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2',
+              openaiOAuthHTTPToWSEnabled ? 'bg-primary-600' : 'bg-gray-200 dark:bg-dark-600'
+            ]"
+          >
+            <span
+              :class="[
+                'pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow transition',
+                openaiOAuthHTTPToWSEnabled ? 'translate-x-5' : 'translate-x-0'
+              ]"
+            />
+          </button>
+        </div>
+      </div>
+
       <!-- OpenAI Codex namespace 工具摊平（兼容开关，仅 OAuth） -->
       <div
         v-if="account?.platform === 'openai' && account?.type === 'oauth'"
@@ -2113,6 +2144,20 @@
           <div class="w-52 flex-shrink-0">
             <Select v-model="codexFingerprintMode" data-testid="edit-codex-fingerprint-mode-select" :options="codexFingerprintModeOptions" />
           </div>
+        </div>
+        <div class="mt-3 flex items-center justify-between gap-4" :class="codexFingerprintMode !== 'device' && 'opacity-50'">
+          <div>
+            <label class="input-label mb-0">{{ t('admin.accounts.openai.codexFingerprintSeedCount') }}</label>
+          </div>
+          <input
+            v-model.number="codexFingerprintSeedCount"
+            data-testid="edit-codex-fingerprint-seed-count"
+            type="number"
+            min="1"
+            max="16"
+            class="input w-28"
+            :disabled="codexFingerprintMode !== 'device'"
+          />
         </div>
       </div>
 
@@ -3270,11 +3315,13 @@ const openAICompactMode = ref<OpenAICompactMode>('auto')
 const openAIResponsesMode = ref<OpenAIResponsesMode>('auto')
 const openAIEndpointCapabilities = ref<OpenAIEndpointCapability[]>(['chat_completions', 'embeddings'])
 const openaiOAuthResponsesWebSocketV2Mode = ref<OpenAIWSMode>(OPENAI_WS_MODE_OFF)
+const openaiOAuthHTTPToWSEnabled = ref(false)
 const openaiAPIKeyResponsesWebSocketV2Mode = ref<OpenAIWSMode>(OPENAI_WS_MODE_OFF)
 const codexCLIOnlyEnabled = ref(false)
 const codexCLIOnlyAppServerEnabled = ref(false)
 type CodexFingerprintMode = 'off' | 'device' | 'session' | 'full'
 const codexFingerprintMode = ref<CodexFingerprintMode>('off')
+const codexFingerprintSeedCount = ref(3)
 type CodexImageToolMode = 'inherit' | 'enabled' | 'disabled' | 'block'
 const codexImageToolMode = ref<CodexImageToolMode>('inherit')
 type AnthropicAPIKeyAuthScheme = 'x_api_key' | 'authorization_bearer'
@@ -3750,10 +3797,12 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   openAIEndpointCapabilities.value = ['chat_completions', 'embeddings']
   openAICompactModelMappings.value = []
   openaiOAuthResponsesWebSocketV2Mode.value = OPENAI_WS_MODE_OFF
+  openaiOAuthHTTPToWSEnabled.value = false
   openaiAPIKeyResponsesWebSocketV2Mode.value = OPENAI_WS_MODE_OFF
   codexCLIOnlyEnabled.value = false
   codexCLIOnlyAppServerEnabled.value = false
   codexFingerprintMode.value = 'off'
+  codexFingerprintSeedCount.value = 3
   codexImageToolMode.value = 'inherit'
   anthropicPassthroughEnabled.value = false
   anthropicAPIKeyAuthScheme.value = 'x_api_key'
@@ -3794,6 +3843,8 @@ const syncFormFromAccount = (newAccount: Account | null) => {
       fallbackEnabledKeys: ['responses_websockets_v2_enabled', 'openai_ws_enabled'],
       defaultMode: OPENAI_WS_MODE_OFF
     })
+    openaiOAuthHTTPToWSEnabled.value =
+      newAccount.type === 'oauth' && extra?.openai_oauth_http_to_ws_enabled === true
     openaiAPIKeyResponsesWebSocketV2Mode.value = resolveOpenAIWSModeFromExtra(extra, {
       modeKey: 'openai_apikey_responses_websockets_v2_mode',
       enabledKey: 'openai_apikey_responses_websockets_v2_enabled',
@@ -3811,6 +3862,10 @@ const syncFormFromAccount = (newAccount: Account | null) => {
       codexFingerprintMode.value = (['off', 'device', 'session', 'full'].includes(fpMode || '')
         ? fpMode as CodexFingerprintMode
         : 'off')
+      const fpSeedCount = Number(extra?.codex_fingerprint_seed_count)
+      codexFingerprintSeedCount.value = Number.isFinite(fpSeedCount) && fpSeedCount >= 1 && fpSeedCount <= 16
+        ? Math.floor(fpSeedCount)
+        : 3
     }
     const credentials = newAccount.credentials as Record<string, unknown> | undefined
     const compactMappings = credentials?.compact_model_mapping as Record<string, string> | undefined
@@ -5166,6 +5221,11 @@ const handleSubmit = async () => {
       if (props.account.type === 'oauth' || props.account.type === 'setup-token') {
         newExtra.openai_oauth_responses_websockets_v2_mode = openaiOAuthResponsesWebSocketV2Mode.value
         newExtra.openai_oauth_responses_websockets_v2_enabled = isOpenAIWSModeEnabled(openaiOAuthResponsesWebSocketV2Mode.value)
+        if (props.account.type === 'oauth') {
+          newExtra.openai_oauth_http_to_ws_enabled = openaiOAuthHTTPToWSEnabled.value
+        } else {
+          delete newExtra.openai_oauth_http_to_ws_enabled
+        }
       } else if (props.account.type === 'apikey') {
         newExtra.openai_apikey_responses_websockets_v2_mode = openaiAPIKeyResponsesWebSocketV2Mode.value
         newExtra.openai_apikey_responses_websockets_v2_enabled = isOpenAIWSModeEnabled(openaiAPIKeyResponsesWebSocketV2Mode.value)
@@ -5268,8 +5328,14 @@ const handleSubmit = async () => {
       if (props.account.type === 'oauth') {
         if (codexFingerprintMode.value !== 'off') {
           newExtra.codex_fingerprint_mode = codexFingerprintMode.value
+          if (codexFingerprintMode.value === 'device') {
+            newExtra.codex_fingerprint_seed_count = Math.min(16, Math.max(1, Number(codexFingerprintSeedCount.value) || 3))
+          } else {
+            delete newExtra.codex_fingerprint_seed_count
+          }
         } else {
           delete newExtra.codex_fingerprint_mode
+          delete newExtra.codex_fingerprint_seed_count
         }
       }
 

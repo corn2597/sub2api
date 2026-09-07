@@ -91,12 +91,14 @@ func stripCodexFingerprintSeedFromExtraUpdate(extra map[string]any) map[string]a
 	if extra == nil {
 		return nil
 	}
-	if _, exists := extra["codex_fingerprint_seed"]; !exists {
-		return extra
+	if _, scalarExists := extra["codex_fingerprint_seed"]; !scalarExists {
+		if _, poolExists := extra["codex_fingerprint_seeds"]; !poolExists {
+			return extra
+		}
 	}
 	stripped := make(map[string]any, len(extra)-1)
 	for key, value := range extra {
-		if key == "codex_fingerprint_seed" {
+		if key == "codex_fingerprint_seed" || key == "codex_fingerprint_seeds" {
 			continue
 		}
 		stripped[key] = value

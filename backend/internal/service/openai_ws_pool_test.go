@@ -771,11 +771,11 @@ func TestOpenAIWSConnPool_AcquireRoutingHintRemainsSoftAffinity(t *testing.T) {
 	require.Equal(t, 1, dialer.DialCount())
 }
 
-func TestOpenAIWSConnPool_DeviceModeKeysOnlyInstallationIdentity(t *testing.T) {
+func TestOpenAIWSConnPool_DeviceModeSeparatesMappedSessionIdentity(t *testing.T) {
 	cfg := &config.Config{}
-	cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 2
+	cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 1
 	cfg.Gateway.OpenAIWS.MinIdlePerAccount = 0
-	cfg.Gateway.OpenAIWS.MaxIdlePerAccount = 2
+	cfg.Gateway.OpenAIWS.MaxIdlePerAccount = 1
 
 	pool := newOpenAIWSConnPool(cfg)
 	dialer := &openAIWSCountingDialer{}
@@ -793,6 +793,17 @@ func TestOpenAIWSConnPool_DeviceModeKeysOnlyInstallationIdentity(t *testing.T) {
 	firstConnID := first.ConnID()
 	first.Release()
 
+	sameSession, err := pool.Acquire(context.Background(), openAIWSAcquireRequest{
+		Account: account,
+		WSURL:   "wss://example.com/v1/responses",
+		Headers: firstHeaders.Clone(),
+	})
+	require.NoError(t, err)
+	require.True(t, sameSession.Reused())
+	require.Equal(t, firstConnID, sameSession.ConnID())
+	sameSession.Release()
+	require.Equal(t, 1, dialer.DialCount())
+
 	sessionChanged := stableOpenAIWSIdentityHeadersForTest()
 	sessionChanged.Set("session-id", "session-hyphen-b")
 	sessionChanged.Set("session_id", "session-underscore-b")
@@ -805,8 +816,8 @@ func TestOpenAIWSConnPool_DeviceModeKeysOnlyInstallationIdentity(t *testing.T) {
 		Headers: sessionChanged,
 	})
 	require.NoError(t, err)
-	require.True(t, second.Reused())
-	require.Equal(t, firstConnID, second.ConnID())
+	require.False(t, second.Reused())
+	require.NotEqual(t, firstConnID, second.ConnID())
 	second.Release()
 
 	installationChanged := sessionChanged.Clone()
@@ -820,7 +831,7 @@ func TestOpenAIWSConnPool_DeviceModeKeysOnlyInstallationIdentity(t *testing.T) {
 	require.False(t, third.Reused())
 	require.NotEqual(t, firstConnID, third.ConnID())
 	third.Release()
-	require.Equal(t, 2, dialer.DialCount())
+	require.Equal(t, 3, dialer.DialCount())
 }
 
 func TestOpenAIWSConnPool_AcquireReplacesIdleConnWithDifferentBetaFeatures(t *testing.T) {
@@ -1077,6 +1088,30 @@ func TestOpenAIWSConnPool_CleanupSkipsPinnedConn(t *testing.T) {
 	_, pinnedExists = ap.conns[pinnedConn.id]
 	ap.mu.Unlock()
 	require.False(t, pinnedExists, "解绑后连接应可被正常回收")
+}
+
+func TestOpenAIWSConnPool_CleanupEvictsUnprobeableIdleConnAtHealthBoundary(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 2
+	cfg.Gateway.OpenAIWS.MaxIdlePerAccount = 2
+
+	pool := newOpenAIWSConnPool(cfg)
+	defer pool.Close()
+	accountID := int64(127)
+	ap := pool.getOrCreateAccountPool(accountID)
+	stale := newOpenAIWSConn("unprobeable_stale", accountID, &openAIWSIdlePingUnsupportedConn{}, nil)
+	stale.lastUsedNano.Store(time.Now().Add(-openAIWSConnHealthCheckIdle - time.Second).UnixNano())
+	ap.mu.Lock()
+	ap.conns[stale.id] = stale
+	evicted := pool.cleanupAccountLocked(ap, time.Now(), pool.maxConnsHardCap())
+	ap.mu.Unlock()
+	closeOpenAIWSConns(evicted)
+
+	require.Len(t, evicted, 1)
+	ap.mu.Lock()
+	_, exists := ap.conns[stale.id]
+	ap.mu.Unlock()
+	require.False(t, exists, "无法安全 ping 的空闲连接应在健康检查边界被回收")
 }
 
 func TestOpenAIWSConnPool_PinUnpinConnBranches(t *testing.T) {

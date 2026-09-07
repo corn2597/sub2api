@@ -237,7 +237,7 @@ func TestOpenAIWSProtocolResolver_Resolve_ModeRouterV2(t *testing.T) {
 		require.Equal(t, "ws_v2_mode_passthrough", decision.Reason)
 	})
 
-	t.Run("http_bridge mode routes to http_sse", func(t *testing.T) {
+	t.Run("legacy http_bridge mode is normalized to ctx_pool ws", func(t *testing.T) {
 		httpBridgeAccount := &Account{
 			Platform:    PlatformOpenAI,
 			Type:        AccountTypeOAuth,
@@ -247,8 +247,8 @@ func TestOpenAIWSProtocolResolver_Resolve_ModeRouterV2(t *testing.T) {
 			},
 		}
 		decision := NewOpenAIWSProtocolResolver(cfg).Resolve(httpBridgeAccount)
-		require.Equal(t, OpenAIUpstreamTransportHTTPSSE, decision.Transport)
-		require.Equal(t, "ws_v2_mode_http_bridge", decision.Reason)
+		require.Equal(t, OpenAIUpstreamTransportResponsesWebsocketV2, decision.Transport)
+		require.Equal(t, "ws_v2_mode_ctx_pool", decision.Reason)
 	})
 
 	t.Run("non-positive concurrency is rejected in v2 router", func(t *testing.T) {

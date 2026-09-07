@@ -8,6 +8,8 @@ import (
 type OpsRepository interface {
 	InsertErrorLog(ctx context.Context, input *OpsInsertErrorLogInput) (int64, error)
 	BatchInsertErrorLogs(ctx context.Context, inputs []*OpsInsertErrorLogInput) (int64, error)
+	InsertErrorPayloadCapture(ctx context.Context, requestID string, capture *OpsErrorPayloadCaptureSnapshot) error
+	GetErrorPayloadContent(ctx context.Context, errorID, payloadID int64) (*OpsErrorPayloadContent, error)
 	ListErrorLogs(ctx context.Context, filter *OpsErrorLogFilter) (*OpsErrorLogList, error)
 	GetErrorLogByID(ctx context.Context, id int64) (*OpsErrorLogDetail, error)
 	ListRequestDetails(ctx context.Context, filter *OpsRequestDetailFilter) ([]*OpsRequestDetail, int64, error)
@@ -110,6 +112,11 @@ type OpsInsertErrorLogInput struct {
 	// UpstreamErrorsJSON is the sanitized JSON string stored into ops_error_logs.upstream_errors.
 	// It is set by OpsService.RecordError before persisting.
 	UpstreamErrorsJSON *string
+
+	// PreserveFullErrorDetails disables legacy diagnostic length caps for an
+	// HTTP2WS request. Sanitization still removes credentials and request bodies
+	// are never attached to this input.
+	PreserveFullErrorDetails bool
 
 	AuthLatencyMs      *int64
 	RoutingLatencyMs   *int64

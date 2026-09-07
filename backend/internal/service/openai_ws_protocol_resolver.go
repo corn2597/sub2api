@@ -75,7 +75,10 @@ func (r *defaultOpenAIWSProtocolResolver) Resolve(account *Account) OpenAIWSProt
 		case OpenAIWSIngressModeCtxPool, OpenAIWSIngressModePassthrough:
 			// continue
 		case OpenAIWSIngressModeHTTPBridge:
-			return openAIWSHTTPDecision("ws_v2_mode_http_bridge")
+			// HTTP bridge is a legacy compatibility value. OpenAI Responses
+			// requests now use the Sub2API ctx_pool path; keep accepting the old
+			// persisted value without routing the request through HTTP bridge.
+			mode = OpenAIWSIngressModeCtxPool
 		case OpenAIWSIngressModeShared, OpenAIWSIngressModeDedicated:
 			// 历史值兼容：按 ctx_pool 处理。
 			mode = OpenAIWSIngressModeCtxPool

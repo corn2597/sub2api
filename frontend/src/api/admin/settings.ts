@@ -1554,6 +1554,59 @@ export async function resetWebSearchUsage(payload: {
   );
 }
 
+// --- OpenAI egress sidecar ---
+
+export interface OpenAIEgressSettings {
+  enabled: boolean;
+  http_enabled: boolean;
+  ws_enabled: boolean;
+  oauth_enabled: boolean;
+  fallback_to_direct: boolean;
+  allow_proxy: boolean;
+  base_url: string;
+  timeout_seconds: number;
+  secret_configured: boolean;
+  runtime_override: boolean;
+  sidecar_service?: string;
+  sidecar_version?: string;
+  sidecar_runtime?: string;
+  sidecar_reachable: boolean;
+  sidecar_error?: string;
+}
+
+export interface OpenAIEgressRuntimeUpdate {
+  enabled: boolean;
+  http_enabled: boolean;
+  ws_enabled: boolean;
+  oauth_enabled: boolean;
+  fallback_to_direct: boolean;
+  allow_proxy: boolean;
+}
+
+export async function getOpenAIEgressSettings(): Promise<OpenAIEgressSettings> {
+  const { data } = await apiClient.get<OpenAIEgressSettings>(
+    "/admin/settings/openai-egress",
+  );
+  return data;
+}
+
+export async function updateOpenAIEgressSettings(
+  settings: OpenAIEgressRuntimeUpdate,
+): Promise<OpenAIEgressSettings> {
+  const { data } = await apiClient.put<OpenAIEgressSettings>(
+    "/admin/settings/openai-egress",
+    settings,
+  );
+  return data;
+}
+
+export async function testOpenAIEgressSettings(): Promise<OpenAIEgressSettings> {
+  const { data } = await apiClient.post<OpenAIEgressSettings>(
+    "/admin/settings/openai-egress/test",
+  );
+  return data;
+}
+
 export const settingsAPI = {
   getSettings,
   updateSettings,
@@ -1583,6 +1636,9 @@ export const settingsAPI = {
   updateWebSearchEmulationConfig,
   testWebSearchEmulation,
   resetWebSearchUsage,
+  getOpenAIEgressSettings,
+  updateOpenAIEgressSettings,
+  testOpenAIEgressSettings,
 };
 
 export default settingsAPI;

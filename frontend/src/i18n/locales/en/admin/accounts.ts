@@ -578,6 +578,9 @@ export default {
         wsMode: 'WS mode',
         wsModeDesc:
           'Only applies to the current OpenAI account type; account WS modes, including http_bridge, take effect only when the global gateway.openai_ws.mode_router_v2_enabled=true.',
+        httpToWS: 'Responses HTTP to WebSocket',
+        httpToWSDesc:
+          'OAuth only. Explicitly opts this account into upstream WebSocket for replay-safe HTTP /v1/responses requests. The global http_to_ws_enabled switch and WS v2 must also be enabled.',
         wsModeOff: 'Off (off)',
         wsModeCtxPool: 'Context Pool (ctx_pool)',
         wsModePassthrough: 'Passthrough (passthrough)',
@@ -628,10 +631,11 @@ export default {
         codexCLIOnlyAppServerDesc:
           "Effective only when the switch above is on. When enabled, this account also allows third-party clients that embed the Codex engine over the app-server protocol (e.g. Claude Code's codex plugin); they still pass the global engine-fingerprint gate. OR-combined with the global app-server toggle.",
         codexFingerprintMode: 'Codex fingerprint convergence',
-        codexFingerprintModeDesc: 'When multiple users share the same OAuth account, converge device/session identifiers to account-level stable values to reduce upstream-visible device and session count. Off by default (client identifiers pass through as-is); opt in explicitly when needed. Some accounts reported quota shrinkage after enabling convergence, so choose based on your own measurements.',
+        codexFingerprintSeedCount: 'Device seed count (device mode only)',
+        codexFingerprintModeDesc: 'When multiple users share one OAuth account, isolate device, session, and thread identifiers per account. Device mode preserves session/thread cardinality while deterministically mapping each original ID with the account seed, preventing cross-account mixing. Off by default; some accounts reported quota shrinkage after enabling convergence, so choose based on your own measurements.',
         codexFingerprintOff: 'Off (passthrough, default)',
-        codexFingerprintDevice: 'Device only',
-        codexFingerprintSession: 'Device + Session',
+        codexFingerprintDevice: 'Device isolation (1:1 session/thread mapping)',
+        codexFingerprintSession: 'Device + Single Session (isolated threads)',
         codexFingerprintFull: 'Full convergence',
         codexImageTool: 'Codex image bridge policy',
         codexImageToolDesc:

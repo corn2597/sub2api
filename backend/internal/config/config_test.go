@@ -494,8 +494,17 @@ func TestLoadDefaultOpenAIWSConfig(t *testing.T) {
 	if cfg.Gateway.OpenAIWS.PrewarmCooldownMS != 300 {
 		t.Fatalf("Gateway.OpenAIWS.PrewarmCooldownMS = %d, want 300", cfg.Gateway.OpenAIWS.PrewarmCooldownMS)
 	}
-	if cfg.Gateway.OpenAIWS.ClientReadLimitBytes != 64*1024*1024 {
-		t.Fatalf("Gateway.OpenAIWS.ClientReadLimitBytes = %d, want %d", cfg.Gateway.OpenAIWS.ClientReadLimitBytes, 64*1024*1024)
+	if cfg.Gateway.OpenAIWS.ClientReadLimitBytes != 256*1024*1024 {
+		t.Fatalf("Gateway.OpenAIWS.ClientReadLimitBytes = %d, want %d", cfg.Gateway.OpenAIWS.ClientReadLimitBytes, 256*1024*1024)
+	}
+	if cfg.Gateway.OpenAIWS.EgressMessageLimitBytes != 256*1024*1024 {
+		t.Fatalf("Gateway.OpenAIWS.EgressMessageLimitBytes = %d, want %d", cfg.Gateway.OpenAIWS.EgressMessageLimitBytes, 256*1024*1024)
+	}
+	if cfg.Gateway.OpenAIWS.LargeMessageThresholdBytes != 32*1024*1024 {
+		t.Fatalf("Gateway.OpenAIWS.LargeMessageThresholdBytes = %d, want %d", cfg.Gateway.OpenAIWS.LargeMessageThresholdBytes, 32*1024*1024)
+	}
+	if cfg.Gateway.OpenAIWS.LargeMessageMaxInflight != 1 {
+		t.Fatalf("Gateway.OpenAIWS.LargeMessageMaxInflight = %d, want 1", cfg.Gateway.OpenAIWS.LargeMessageMaxInflight)
 	}
 	if !cfg.Gateway.OpenAIWS.HTTPBridgeEnabled {
 		t.Fatalf("Gateway.OpenAIWS.HTTPBridgeEnabled = false, want true")
@@ -517,6 +526,12 @@ func TestLoadDefaultOpenAIWSConfig(t *testing.T) {
 	}
 	if cfg.Gateway.OpenAIWS.PayloadLogSampleRate != 0.2 {
 		t.Fatalf("Gateway.OpenAIWS.PayloadLogSampleRate = %v, want 0.2", cfg.Gateway.OpenAIWS.PayloadLogSampleRate)
+	}
+	if cfg.Gateway.OpenAIWS.ErrorPayloadCaptureEnabled {
+		t.Fatalf("Gateway.OpenAIWS.ErrorPayloadCaptureEnabled = true, want false")
+	}
+	if cfg.Gateway.OpenAIWS.ErrorPayloadRetentionHours != 72 {
+		t.Fatalf("Gateway.OpenAIWS.ErrorPayloadRetentionHours = %d, want 72", cfg.Gateway.OpenAIWS.ErrorPayloadRetentionHours)
 	}
 	if cfg.Gateway.OpenAIWS.SchedulerScoreWeights.QuotaHeadroom != 0 {
 		t.Fatalf("Gateway.OpenAIWS.SchedulerScoreWeights.QuotaHeadroom = %v, want 0", cfg.Gateway.OpenAIWS.SchedulerScoreWeights.QuotaHeadroom)
@@ -2277,6 +2292,11 @@ func TestValidateConfig_OpenAIWSRules(t *testing.T) {
 			wantErr: "gateway.openai_ws.payload_log_sample_rate",
 		},
 		{
+			name:    "error_payload_retention_hours 必须为正数",
+			mutate:  func(c *Config) { c.Gateway.OpenAIWS.ErrorPayloadRetentionHours = 0 },
+			wantErr: "gateway.openai_ws.error_payload_retention_hours",
+		},
+		{
 			name:    "retry_total_budget_ms 不能为负数",
 			mutate:  func(c *Config) { c.Gateway.OpenAIWS.RetryTotalBudgetMS = -1 },
 			wantErr: "gateway.openai_ws.retry_total_budget_ms",
@@ -2425,6 +2445,19 @@ func TestValidateConfig_OpenAIWSRules(t *testing.T) {
 
 		require.NoError(t, cfg.Validate())
 	})
+}
+
+func TestValidateConfig_OpenAIEgressRequiresSharedSecret(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	cfg, err := Load()
+	require.NoError(t, err)
+
+	cfg.Gateway.OpenAIEgress.Enabled = true
+	cfg.Gateway.OpenAIEgress.BaseURL = "http://127.0.0.1:12783"
+	cfg.Gateway.OpenAIEgress.SharedSecret = ""
+
+	err = cfg.Validate()
+	require.ErrorContains(t, err, "gateway.openai_egress.shared_secret")
 }
 
 func TestValidateConfig_AutoScaleDisabledIgnoreAutoScaleFields(t *testing.T) {

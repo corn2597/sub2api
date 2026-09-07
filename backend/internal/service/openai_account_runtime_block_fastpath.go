@@ -10,10 +10,14 @@ import (
 )
 
 const (
-	openAIAccountStateUpdateTimeout       = 5 * time.Second
-	openAIOAuth429FallbackCooldown        = 5 * time.Second
-	openAIOAuth429RetryWindow             = 2 * time.Minute
-	openAIOAuth429RetryDelay              = 500 * time.Millisecond
+	openAIAccountStateUpdateTimeout = 5 * time.Second
+	openAIOAuth429FallbackCooldown  = 5 * time.Second
+	openAIOAuth429RetryWindow       = 2 * time.Minute
+	// Give transient OAuth 429s a longer initial pause so a retry storm does not
+	// immediately add pressure to an already throttled upstream.  A provider
+	// supplied reset is honored only when it asks us to wait longer; shorter
+	// Retry-After values do not reduce this floor.
+	openAIOAuth429RetryDelay              = 5 * time.Second
 	openAIOAuth429MaxRetryDelay           = 8 * time.Second
 	openAIOAuth429MaxAccountAttempts      = 3
 	openAIStopSchedulingBridgeCooldown    = 2 * time.Minute
@@ -306,7 +310,9 @@ func openAIOAuth429SameAccountRetryDelay(headers http.Header, deadline time.Time
 	delay := openAIOAuth429RetryDelay
 	now := time.Now()
 	if resetAt := parseRetryAfterResetTime(headers, now); resetAt != nil && resetAt.After(now) {
-		delay = resetAt.Sub(now)
+		if providerDelay := resetAt.Sub(now); providerDelay > delay {
+			delay = providerDelay
+		}
 	}
 	if delay > openAIOAuth429MaxRetryDelay {
 		delay = openAIOAuth429MaxRetryDelay

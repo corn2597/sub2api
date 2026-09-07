@@ -20,8 +20,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/httpclient"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/opencodeegress"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/servertiming"
 )
@@ -507,6 +509,8 @@ type ContentModerationService struct {
 	authCacheInvalidator     APIKeyAuthCacheInvalidator
 	emailService             *EmailService
 	httpClient               *http.Client
+	openAIEgress             *opencodeegress.Client
+	openAIEgressConfig       *config.Config
 	moderationProxyCache     atomic.Pointer[moderationProxyURLCacheEntry]
 	asyncQueue               chan contentModerationTask
 	workerCount              int
@@ -599,6 +603,39 @@ func NewContentModerationService(
 			go svc.worker(i)
 		}
 		go svc.cleanupWorker()
+	}
+	return svc
+}
+
+// ProvideContentModerationService wires the shared OpenAI egress policy into
+// moderation as well as the gateway paths. The constructor remains unchanged
+// so focused tests and embedders that do not provide global config retain the
+// existing direct-client behavior.
+func ProvideContentModerationService(
+	settingRepo SettingRepository,
+	repo ContentModerationRepository,
+	hashCache ContentModerationHashCache,
+	groupRepo GroupRepository,
+	userRepo UserRepository,
+	proxyRepo ProxyRepository,
+	authCacheInvalidator APIKeyAuthCacheInvalidator,
+	emailService *EmailService,
+	cfg *config.Config,
+) *ContentModerationService {
+	svc := NewContentModerationService(
+		settingRepo,
+		repo,
+		hashCache,
+		groupRepo,
+		userRepo,
+		proxyRepo,
+		authCacheInvalidator,
+		emailService,
+	)
+	if cfg != nil {
+		settings := cfg.OpenAIEgressSnapshot()
+		svc.openAIEgressConfig = cfg
+		svc.openAIEgress = opencodeegress.NewFromConfig(&settings)
 	}
 	return svc
 }
@@ -1758,11 +1795,27 @@ func (s *ContentModerationService) callModerationOnceWithInput(ctx context.Conte
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", "application/json")
 
-	client, err := s.moderationHTTPClient(ctx, cfg)
-	if err != nil {
-		return nil, err
+	var resp *http.Response
+	if s.shouldUseOpenAIEgress(endpoint) {
+		proxyURL, proxyErr := s.moderationProxyURL(ctx, cfg)
+		if proxyErr != nil {
+			return nil, proxyErr
+		}
+		egress := s.openAIEgress
+		if egress == nil || !egress.Enabled() {
+			settings := s.openAIEgressConfig.OpenAIEgressSnapshot()
+			egress = opencodeegress.NewFromConfig(&settings)
+		}
+		resp, err = egress.ProxyHTTP(
+			req.Context(), endpoint, req.Method, req.Header, req.Body, req.ContentLength, proxyURL, "model",
+		)
+	} else {
+		client, clientErr := s.moderationHTTPClient(ctx, cfg)
+		if clientErr != nil {
+			return nil, clientErr
+		}
+		resp, err = client.Do(req)
 	}
-	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -1783,6 +1836,37 @@ func (s *ContentModerationService) callModerationOnceWithInput(ctx context.Conte
 		return nil, errors.New("moderation api returned empty results")
 	}
 	return &out.Results[0], nil
+}
+
+func (s *ContentModerationService) shouldUseOpenAIEgress(endpoint string) bool {
+	if s == nil || s.openAIEgress == nil || s.openAIEgressConfig == nil {
+		return false
+	}
+	settings := s.openAIEgressConfig.OpenAIEgressSnapshot()
+	if !settings.Enabled || !settings.HTTPEnabled {
+		return false
+	}
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(parsed.Hostname())
+	return host == "api.openai.com" || host == "chatgpt.com" ||
+		strings.HasSuffix(host, ".openai.com") || strings.HasSuffix(host, ".chatgpt.com")
+}
+
+func (s *ContentModerationService) moderationProxyURL(ctx context.Context, cfg *ContentModerationConfig) (string, error) {
+	if cfg == nil || cfg.ProxyID == nil {
+		return "", nil
+	}
+	proxyURL, err := s.resolveModerationProxyURL(ctx, *cfg.ProxyID)
+	if err != nil {
+		return "", err
+	}
+	if s.openAIEgressConfig != nil && strings.TrimSpace(proxyURL) != "" && !s.openAIEgressConfig.OpenAIEgressSnapshot().AllowProxy {
+		return "", errors.New("OpenAI egress proxy forwarding is disabled")
+	}
+	return proxyURL, nil
 }
 
 // moderationProxyURLCacheEntry 缓存 proxy_id 到代理 URL 的解析结果，

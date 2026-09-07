@@ -956,6 +956,29 @@ export interface OpsErrorDetail extends OpsErrorLog {
 
   // Bound (non-deleted) key prefix, snapshotted at error time
   api_key_prefix?: string | null
+
+  // Complete request bytes are available only through the admin download API.
+  request_payloads?: OpsErrorPayloadMetadata[]
+}
+
+export interface OpsErrorPayloadAttemptMetadata {
+  sequence_no: number
+  attempt_no: number
+  account_id?: number | null
+  conn_id?: string
+  connection_reused: boolean
+  write_succeeded: boolean
+  write_error?: string
+  created_at: string
+}
+
+export interface OpsErrorPayloadMetadata {
+  id: number
+  kind: 'http' | 'ws'
+  sha256: string
+  payload_bytes: number
+  created_at: string
+  attempts?: OpsErrorPayloadAttemptMetadata[]
 }
 
 export type OpsErrorLogsResponse = PaginatedResponse<OpsErrorLog>
@@ -1120,6 +1143,13 @@ export async function listErrorLogs(params: OpsErrorListQueryParams): Promise<Op
 
 export async function getErrorLogDetail(id: number): Promise<OpsErrorDetail> {
   const { data } = await apiClient.get<OpsErrorDetail>(`/admin/ops/errors/${id}`)
+  return data
+}
+
+export async function downloadErrorPayload(errorId: number, payloadId: number): Promise<Blob> {
+  const { data } = await apiClient.get<Blob>(`/admin/ops/errors/${errorId}/payloads/${payloadId}`, {
+    responseType: 'blob'
+  })
   return data
 }
 
@@ -1322,6 +1352,7 @@ export const opsAPI = {
   // Legacy unified endpoints
   listErrorLogs,
   getErrorLogDetail,
+  downloadErrorPayload,
   updateErrorResolved,
 
   // New split endpoints

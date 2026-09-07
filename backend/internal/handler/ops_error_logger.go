@@ -63,6 +63,7 @@ const (
 
 const (
 	opsErrorLogTimeout      = 5 * time.Second
+	opsErrorPayloadTimeout  = 2 * time.Minute
 	opsErrorLogDrainTimeout = 10 * time.Second
 	opsErrorLogBatchWindow  = 200 * time.Millisecond
 
@@ -215,7 +216,13 @@ func enqueueOpsErrorLog(ops *service.OpsService, entry *service.OpsInsertErrorLo
 	entry.UserAgent = normalizeOpsPersistentUserAgent(entry.UserAgent)
 	if entry.ErrorBody != "" {
 		originalBody := entry.ErrorBody
-		body, truncated := service.SanitizeOpsErrorBodyForQueue(originalBody)
+		var body string
+		var truncated bool
+		if entry.PreserveFullErrorDetails {
+			body, truncated = service.SanitizeOpsErrorBodyFullForQueue(originalBody)
+		} else {
+			body, truncated = service.SanitizeOpsErrorBodyForQueue(originalBody)
+		}
 		entry.ErrorBody = body
 		if truncated || body != originalBody {
 			opsErrorLogSanitized.Add(1)
@@ -1098,9 +1105,6 @@ func OpsErrorLoggerMiddleware(ops *service.OpsService) gin.HandlerFunc {
 		if ops == nil {
 			return
 		}
-		if !ops.IsMonitoringEnabled(c.Request.Context()) {
-			return
-		}
 		if c.GetBool(opsDedicatedErrorRecordedKey) {
 			return
 		}
@@ -1108,6 +1112,7 @@ func OpsErrorLoggerMiddleware(ops *service.OpsService) gin.HandlerFunc {
 		if shouldSkipOpsErrorLogForCyber(c) {
 			return
 		}
+		monitoringEnabled := ops.IsMonitoringEnabled(c.Request.Context())
 
 		status := c.Writer.Status()
 		body := w.capturedBytes()
@@ -1125,12 +1130,21 @@ func OpsErrorLoggerMiddleware(ops *service.OpsService) gin.HandlerFunc {
 				// wire status is already 200. Otherwise retain recovered attempts as a
 				// provider-health row whose 2xx status keeps it outside request SLA.
 				if len(service.GetOpsStreamErrors(c)) > 0 {
-					logOpsStreamError(c, ops, status)
+					persistOpsErrorPayloadCapture(c, ops)
+					if monitoringEnabled {
+						logOpsStreamError(c, ops, status)
+					}
 				} else {
-					logOpsRecoveredUpstream(c, ops, status)
+					if monitoringEnabled {
+						logOpsRecoveredUpstream(c, ops, status)
+					}
 				}
 				return
 			}
+		}
+		persistOpsErrorPayloadCapture(c, ops)
+		if !monitoringEnabled {
+			return
 		}
 
 		// Skip logging if a passthrough rule with skip_monitoring=true matched.
@@ -1181,8 +1195,9 @@ func OpsErrorLoggerMiddleware(ops *service.OpsService) gin.HandlerFunc {
 		phase, isBusinessLimited, errorOwner, errorSource := classifyOpsErrorLog(c, normalizedType, parsed.Message, parsed.Code, status)
 
 		entry := &service.OpsInsertErrorLogInput{
-			RequestID:       requestID,
-			ClientRequestID: clientRequestID,
+			PreserveFullErrorDetails: service.PreserveFullOpsErrorDetails(c),
+			RequestID:                requestID,
+			ClientRequestID:          clientRequestID,
 
 			AccountID: accountID,
 			Platform:  platform,
@@ -1228,7 +1243,7 @@ func OpsErrorLoggerMiddleware(ops *service.OpsService) gin.HandlerFunc {
 
 			ErrorMessage: parsed.Message,
 			// Sanitize each SSE data payload before the body enters the async queue.
-			ErrorBody:   sanitizeOpsSSEDataForPersistence(body),
+			ErrorBody:   sanitizeOpsSSEDataForPersistence(body, service.PreserveFullOpsErrorDetails(c)),
 			ErrorSource: errorSource,
 			ErrorOwner:  errorOwner,
 
@@ -1245,6 +1260,7 @@ func OpsErrorLoggerMiddleware(ops *service.OpsService) gin.HandlerFunc {
 				entry.UpstreamStatusCode = &finalStatus
 			}
 		}
+		prependOpsLifecycleEvents(c, entry)
 		suppressOpsUpstreamAttributionForLocalModelConfiguration(c, entry)
 
 		if apiKey != nil {
@@ -1268,7 +1284,6 @@ func OpsErrorLoggerMiddleware(ops *service.OpsService) gin.HandlerFunc {
 			clientIP = ip
 			entry.ClientIP = &clientIP
 		}
-
 		enqueueOpsErrorLog(ops, entry)
 	}
 }
@@ -1278,7 +1293,10 @@ func logOpsRecoveredUpstream(c *gin.Context, ops *service.OpsService, finalStatu
 		return
 	}
 
-	entry := &service.OpsInsertErrorLogInput{StatusCode: finalStatus}
+	entry := &service.OpsInsertErrorLogInput{
+		StatusCode:               finalStatus,
+		PreserveFullErrorDetails: service.PreserveFullOpsErrorDetails(c),
+	}
 	applyOpsUpstreamFieldsFromContext(c, entry)
 	if len(entry.UpstreamErrors) > 0 {
 		visibleEvents := make([]*service.OpsUpstreamErrorEvent, 0, len(entry.UpstreamErrors))
@@ -1337,7 +1355,9 @@ func logOpsRecoveredUpstream(c *gin.Context, ops *service.OpsService, finalStatu
 	if entry.UpstreamErrorMessage != nil && strings.TrimSpace(*entry.UpstreamErrorMessage) != "" {
 		entry.ErrorMessage += ": " + strings.TrimSpace(*entry.UpstreamErrorMessage)
 	}
-	entry.ErrorMessage = truncateString(entry.ErrorMessage, 2048)
+	if !entry.PreserveFullErrorDetails {
+		entry.ErrorMessage = truncateString(entry.ErrorMessage, 2048)
+	}
 
 	if c.Request != nil {
 		entry.UserAgent = c.GetHeader("User-Agent")
@@ -1476,8 +1496,9 @@ func logOpsStreamErrorValue(c *gin.Context, ops *service.OpsService, wireStatus 
 	}
 
 	entry := &service.OpsInsertErrorLogInput{
-		RequestID:       requestID,
-		ClientRequestID: clientRequestID,
+		PreserveFullErrorDetails: service.PreserveFullOpsErrorDetails(c),
+		RequestID:                requestID,
+		ClientRequestID:          clientRequestID,
 
 		AccountID: accountID,
 		Platform:  platform,
@@ -1534,6 +1555,7 @@ func logOpsStreamErrorValue(c *gin.Context, ops *service.OpsService, wireStatus 
 	if streamErr.Turn > 0 {
 		applyOpsStreamErrorSnapshot(entry, streamErr)
 	}
+	prependOpsLifecycleEvents(c, entry)
 
 	if apiKey != nil {
 		entry.APIKeyID = &apiKey.ID
@@ -1552,8 +1574,28 @@ func logOpsStreamErrorValue(c *gin.Context, ops *service.OpsService, wireStatus 
 	if clientIP := strings.TrimSpace(ip.GetClientIP(c)); clientIP != "" {
 		entry.ClientIP = &clientIP
 	}
-
 	enqueueOpsErrorLog(ops, entry)
+}
+
+func persistOpsErrorPayloadCapture(c *gin.Context, ops *service.OpsService) {
+	if c == nil || c.Request == nil || ops == nil {
+		return
+	}
+	capture := service.TakeOpsErrorPayloadCapture(c)
+	if capture == nil {
+		return
+	}
+	requestID, _ := c.Request.Context().Value(ctxkey.RequestID).(string)
+	requestID = strings.TrimSpace(requestID)
+	if requestID == "" {
+		requestID = strings.TrimSpace(c.Writer.Header().Get("X-Request-Id"))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), opsErrorPayloadTimeout)
+	err := ops.RecordErrorPayloadCapture(ctx, requestID, capture)
+	cancel()
+	if err != nil {
+		log.Printf("[OpsErrorLogger] payload_capture_failed request_id=%q: %v", requestID, err)
+	}
 }
 
 func applyOpsStreamErrorSnapshot(entry *service.OpsInsertErrorLogInput, streamErr service.OpsStreamError) {
@@ -1714,6 +1756,62 @@ func applyOpsUpstreamErrorEvents(entry *service.OpsInsertErrorLogInput, events [
 	if detail := strings.TrimSpace(last.Detail); detail != "" {
 		entry.UpstreamErrorDetail = &detail
 	}
+}
+
+// prependOpsLifecycleEvents adds payload-free HTTP2WS stage markers ahead of
+// the real upstream attempts. Keeping markers first preserves the final
+// upstream error as the top-level message/status while exposing the complete
+// request path in the existing error-detail JSON field.
+func prependOpsLifecycleEvents(c *gin.Context, entry *service.OpsInsertErrorLogInput) {
+	if c == nil || entry == nil || !service.PreserveFullOpsErrorDetails(c) {
+		return
+	}
+	events := service.GetOpsRequestLifecycleEvents(c)
+	if len(events) == 0 {
+		return
+	}
+	markers := make([]*service.OpsUpstreamErrorEvent, 0, len(events))
+	for _, event := range events {
+		if strings.TrimSpace(event.Event) == "" {
+			continue
+		}
+		markers = append(markers, &service.OpsUpstreamErrorEvent{
+			AtUnixMs:          event.AtUnixMs,
+			AccountID:         event.AccountID,
+			UpstreamRequestID: event.ConnID,
+			Kind:              "lifecycle",
+			Event:             event.Event,
+			Stage:             event.Event,
+			Scope:             event.Scope,
+			Reason:            event.Reason,
+			Message:           event.Outcome,
+			Detail:            lifecycleEventDetail(event),
+		})
+	}
+	if len(markers) == 0 {
+		return
+	}
+	combined := make([]*service.OpsUpstreamErrorEvent, 0, len(markers)+len(entry.UpstreamErrors))
+	combined = append(combined, markers...)
+	combined = append(combined, entry.UpstreamErrors...)
+	entry.UpstreamErrors = combined
+}
+
+func lifecycleEventDetail(event service.OpsRequestLifecycleEvent) string {
+	parts := make([]string, 0, 4)
+	if event.Attempt > 0 {
+		parts = append(parts, "attempt="+strconv.Itoa(event.Attempt))
+	}
+	if event.Retry > 0 {
+		parts = append(parts, "retry="+strconv.Itoa(event.Retry))
+	}
+	if event.HTTPStatus > 0 {
+		parts = append(parts, "http_status="+strconv.Itoa(event.HTTPStatus))
+	}
+	if event.ErrorStatus > 0 {
+		parts = append(parts, "error_status="+strconv.Itoa(event.ErrorStatus))
+	}
+	return strings.Join(parts, " ")
 }
 
 func suppressOpsUpstreamAttributionForLocalModelConfiguration(c *gin.Context, entry *service.OpsInsertErrorLogInput) {
@@ -1953,7 +2051,7 @@ func opsSSEErrorObject(event map[string]any) map[string]any {
 	return nil
 }
 
-func sanitizeOpsSSEDataForPersistence(body []byte) string {
+func sanitizeOpsSSEDataForPersistence(body []byte, preserveFull bool) string {
 	if len(body) == 0 || !bytes.Contains(body, []byte("data")) {
 		return string(body)
 	}
@@ -1970,7 +2068,11 @@ func sanitizeOpsSSEDataForPersistence(body []byte) string {
 		trimmedPayload := bytes.TrimSpace(payload)
 		replacement := ""
 		if json.Valid(trimmedPayload) {
-			replacement, _ = service.SanitizeOpsErrorBodyForQueue(string(trimmedPayload))
+			if preserveFull {
+				replacement, _ = service.SanitizeOpsErrorBodyFullForQueue(string(trimmedPayload))
+			} else {
+				replacement, _ = service.SanitizeOpsErrorBodyForQueue(string(trimmedPayload))
+			}
 		} else if len(trimmedPayload) > 0 && (trimmedPayload[0] == '{' || trimmedPayload[0] == '[') {
 			// Captured terminal frames can be truncated at the queue bound. Never
 			// persist a JSON-looking fragment that could contain an unredacted key.

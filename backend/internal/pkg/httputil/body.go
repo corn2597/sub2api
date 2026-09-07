@@ -17,9 +17,10 @@ const (
 	requestBodyReadInitCap    = 512
 	requestBodyReadMaxInitCap = 1 << 20
 	jsonUTF8BOMLen            = 3
-	// maxDecompressedBodySize limits the decompressed request body to 64 MB
-	// to prevent decompression bomb attacks.
-	maxDecompressedBodySize = 64 << 20
+	// Keep the decompressed limit aligned with the gateway's default 256 MiB
+	// request limit. Compressed requests are checked again after decoding so an
+	// expansion beyond the limit cannot be silently truncated.
+	maxDecompressedBodySize = 256 << 20
 )
 
 // ReadRequestBodyWithPrealloc reads request body with preallocated buffer based
@@ -83,24 +84,35 @@ func decompressRequestBody(encoding string, raw []byte) ([]byte, error) {
 			return nil, err
 		}
 		defer dec.Close()
-		return io.ReadAll(io.LimitReader(dec, maxDecompressedBodySize))
+		return readDecompressedBody(dec, maxDecompressedBodySize)
 	case "gzip", "x-gzip":
 		gr, err := gzip.NewReader(bytes.NewReader(raw))
 		if err != nil {
 			return nil, err
 		}
 		defer func() { _ = gr.Close() }()
-		return io.ReadAll(io.LimitReader(gr, maxDecompressedBodySize))
+		return readDecompressedBody(gr, maxDecompressedBodySize)
 	case "deflate":
 		zr, err := zlib.NewReader(bytes.NewReader(raw))
 		if err != nil {
 			return nil, err
 		}
 		defer func() { _ = zr.Close() }()
-		return io.ReadAll(io.LimitReader(zr, maxDecompressedBodySize))
+		return readDecompressedBody(zr, maxDecompressedBodySize)
 	default:
 		return nil, errors.New("unsupported Content-Encoding")
 	}
+}
+
+func readDecompressedBody(reader io.Reader, limit int64) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(reader, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > limit {
+		return nil, &http.MaxBytesError{Limit: limit}
+	}
+	return body, nil
 }
 
 // NormalizeLenientJSONRequestBody escapes raw control bytes that broken

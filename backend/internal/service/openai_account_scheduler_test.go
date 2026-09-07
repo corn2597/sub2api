@@ -689,6 +689,50 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_DefaultDisabled_Embeddi
 	require.Equal(t, openAIAccountScheduleLayerLoadBalance, decision.Layer)
 }
 
+func TestOpenAIGatewayService_SelectAccountWithScheduler_ForcedRetryNeverDriftsAccounts(t *testing.T) {
+	resetOpenAIAdvancedSchedulerSettingCacheForTest()
+
+	groupID := int64(10111)
+	acquiredIDs := make([]int64, 0, 1)
+	accounts := []Account{
+		{
+			ID: 36101, Platform: PlatformOpenAI, Type: AccountTypeAPIKey,
+			Status: StatusActive, Schedulable: true, Concurrency: 1, Priority: 0,
+			GroupIDs: []int64{groupID},
+		},
+		{
+			ID: 36102, Platform: PlatformOpenAI, Type: AccountTypeAPIKey,
+			Status: StatusActive, Schedulable: true, Concurrency: 1, Priority: 100,
+			GroupIDs: []int64{groupID},
+		},
+	}
+	cfg := &config.Config{}
+	cfg.Gateway.Scheduling.LoadBatchEnabled = false
+	svc := &OpenAIGatewayService{
+		accountRepo: schedulerTestOpenAIAccountRepo{accounts: accounts},
+		cache:       &schedulerTestGatewayCache{},
+		cfg:         cfg,
+		concurrencyService: NewConcurrencyService(schedulerTestConcurrencyCache{
+			acquiredIDs: &acquiredIDs,
+		}),
+	}
+
+	ctx := WithOpenAIForcedRetryAccount(context.Background(), 36101)
+	selection, decision, err := svc.SelectAccountWithSchedulerForCapability(
+		ctx, &groupID, "", "session-hash", "gpt-5.1", nil,
+		OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityResponses,
+		false, false, true,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, selection)
+	require.Equal(t, int64(36101), selection.Account.ID)
+	require.Equal(t, []int64{36101}, acquiredIDs)
+	require.Equal(t, openAIAccountScheduleLayerForcedRetry, decision.Layer)
+	if selection.ReleaseFunc != nil {
+		selection.ReleaseFunc()
+	}
+}
+
 func TestOpenAIGatewayService_SelectAccountForTokenCount_DoesNotAcquireGenerationSlot(t *testing.T) {
 	ctx := context.Background()
 	groupID := int64(10115)
@@ -3665,7 +3709,9 @@ func TestDefaultOpenAIAccountScheduler_IsAccountTransportCompatible_Branches(t *
 
 	cfg.Gateway.OpenAIWS.ModeRouterV2Enabled = true
 	account.Extra["openai_apikey_responses_websockets_v2_mode"] = OpenAIWSIngressModeHTTPBridge
-	require.False(t, scheduler.isAccountTransportCompatible(account, OpenAIUpstreamTransportResponsesWebsocketV2))
+	// Legacy http_bridge remains valid for native WS ingress, while HTTP2WS is
+	// normalized to the ctx_pool websocket transport.
+	require.True(t, scheduler.isAccountTransportCompatible(account, OpenAIUpstreamTransportResponsesWebsocketV2))
 	require.True(t, scheduler.isAccountTransportCompatible(account, OpenAIUpstreamTransportResponsesWebsocketV2Ingress))
 
 	account.Extra["openai_apikey_responses_websockets_v2_mode"] = OpenAIWSIngressModeOff

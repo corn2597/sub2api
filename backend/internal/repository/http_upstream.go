@@ -27,6 +27,7 @@ import (
 	"golang.org/x/net/http2"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/opencodeegress"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/proxyurl"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/proxyutil"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/servertiming"
@@ -158,9 +159,10 @@ type openAIHTTP2FallbackState struct {
 // 7. 代理变更时清空旧连接池，避免复用错误代理
 // 8. 账号并发数与连接池上限对应（账号隔离策略下）
 type httpUpstreamService struct {
-	cfg     *config.Config                  // 全局配置
-	mu      sync.RWMutex                    // 保护 clients map 的读写锁
-	clients map[string]*upstreamClientEntry // 客户端缓存池，key 由隔离策略决定
+	cfg          *config.Config // 全局配置
+	openAIEgress *opencodeegress.Client
+	mu           sync.RWMutex                    // 保护 clients map 的读写锁
+	clients      map[string]*upstreamClientEntry // 客户端缓存池，key 由隔离策略决定
 	// OpenAI 走 HTTP/HTTPS 代理时的 H2->H1 回退状态（key=标准化 proxyKey）
 	openAIHTTP2Fallbacks sync.Map
 }
@@ -174,10 +176,15 @@ type httpUpstreamService struct {
 // 返回:
 //   - service.HTTPUpstream 接口实现
 func NewHTTPUpstream(cfg *config.Config) service.HTTPUpstream {
-	return &httpUpstreamService{
+	upstream := &httpUpstreamService{
 		cfg:     cfg,
 		clients: make(map[string]*upstreamClientEntry),
 	}
+	if cfg != nil {
+		settings := cfg.OpenAIEgressSnapshot()
+		upstream.openAIEgress = opencodeegress.NewFromConfig(&settings)
+	}
+	return upstream
 }
 
 // Do 执行 HTTP 请求
@@ -204,6 +211,9 @@ func (s *httpUpstreamService) Do(req *http.Request, proxyURL string, accountID i
 	profile := service.HTTPUpstreamProfileDefault
 	if req != nil {
 		profile = service.HTTPUpstreamProfileFromContext(req.Context())
+	}
+	if s.shouldUseOpenAIEgress(req) {
+		return s.doOpenAIEgress(req, proxyURL, accountID, accountConcurrency)
 	}
 
 	// 获取或创建对应的客户端，并标记请求占用
@@ -243,6 +253,13 @@ func (s *httpUpstreamService) Do(req *http.Request, proxyURL string, accountID i
 // profile 为 nil 时不启用 TLS 指纹，行为与 Do 方法相同。
 // profile 非 nil 时使用指定的 Profile 进行 TLS 指纹伪装。
 func (s *httpUpstreamService) DoWithTLS(req *http.Request, proxyURL string, accountID int64, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error) {
+	upstreamProfile := service.HTTPUpstreamProfileDefault
+	if req != nil {
+		upstreamProfile = service.HTTPUpstreamProfileFromContext(req.Context())
+	}
+	if s.shouldUseOpenAIEgress(req) {
+		return s.doOpenAIEgress(req, proxyURL, accountID, accountConcurrency)
+	}
 	if profile == nil {
 		return s.Do(req, proxyURL, accountID, accountConcurrency)
 	}
@@ -252,11 +269,6 @@ func (s *httpUpstreamService) DoWithTLS(req *http.Request, proxyURL string, acco
 		return s.Do(req, proxyURL, accountID, accountConcurrency)
 	}
 	applyGrokCLIProxyHeaders(req)
-	upstreamProfile := service.HTTPUpstreamProfileDefault
-	if req != nil {
-		upstreamProfile = service.HTTPUpstreamProfileFromContext(req.Context())
-	}
-
 	targetHost := ""
 	if req != nil && req.URL != nil {
 		targetHost = req.URL.Host
@@ -294,6 +306,88 @@ func (s *httpUpstreamService) DoWithTLS(req *http.Request, proxyURL string, acco
 		atomic.StoreInt64(&entry.lastUsed, time.Now().UnixNano())
 	})
 
+	return resp, nil
+}
+
+func (s *httpUpstreamService) shouldUseOpenAIEgress(req *http.Request) bool {
+	if s == nil || s.cfg == nil || req == nil || req.URL == nil {
+		return false
+	}
+	settings := s.cfg.OpenAIEgressSnapshot()
+	return settings.Enabled && settings.HTTPEnabled && isOpenAIHost(req.URL.Hostname())
+}
+
+func (s *httpUpstreamService) doOpenAIEgress(req *http.Request, proxyURL string, accountID int64, accountConcurrency int) (*http.Response, error) {
+	if req == nil || req.URL == nil {
+		return nil, errors.New("openai egress request is nil")
+	}
+	if err := s.validateRequestHost(req); err != nil {
+		return nil, err
+	}
+	settings := s.cfg.OpenAIEgressSnapshot()
+	egress := s.openAIEgress
+	if egress == nil || !egress.Enabled() {
+		egress = opencodeegress.NewFromConfig(&settings)
+	}
+	if !egress.Enabled() {
+		return nil, errors.New("openai egress sidecar is enabled but not configured")
+	}
+	if strings.TrimSpace(proxyURL) != "" && !settings.AllowProxy {
+		if settings.FallbackToDirect {
+			return s.doDirect(req, proxyURL, accountID, accountConcurrency)
+		}
+		return nil, errors.New("openai egress sidecar proxy forwarding is disabled")
+	}
+
+	body := req.Body
+	resp, err := egress.ProxyHTTP(
+		req.Context(),
+		req.URL.String(),
+		req.Method,
+		req.Header,
+		body,
+		req.ContentLength,
+		proxyURL,
+		"model",
+	)
+	if err == nil {
+		resp.Request = req
+		return resp, nil
+	}
+	if !settings.FallbackToDirect {
+		return nil, fmt.Errorf("openai egress sidecar request failed: %w", err)
+	}
+	if req.GetBody == nil {
+		return nil, fmt.Errorf("openai egress sidecar request failed and request is not replayable: %w", err)
+	}
+	replayedBody, replayErr := req.GetBody()
+	if replayErr != nil {
+		return nil, fmt.Errorf("openai egress sidecar request failed and request replay failed: %w", errors.Join(err, replayErr))
+	}
+	clone := req.Clone(req.Context())
+	clone.Body = replayedBody
+	clone.GetBody = req.GetBody
+	return s.doDirect(clone, proxyURL, accountID, accountConcurrency)
+}
+
+func (s *httpUpstreamService) doDirect(req *http.Request, proxyURL string, accountID int64, accountConcurrency int) (*http.Response, error) {
+	profile := service.HTTPUpstreamProfileFromContext(req.Context())
+	entry, err := s.acquireClientWithProfile(proxyURL, accountID, accountConcurrency, profile)
+	if err != nil {
+		return nil, err
+	}
+	client := httpClientWithGrokAccessDeniedFallback(httpClientForUpstreamRequest(entry.client, req))
+	resp, err := servertiming.Do(client, req)
+	if err != nil {
+		atomic.AddInt64(&entry.inFlight, -1)
+		atomic.StoreInt64(&entry.lastUsed, time.Now().UnixNano())
+		return nil, err
+	}
+	decompressResponseBody(resp)
+	resp.Body = wrapTrackedBody(resp.Body, func() {
+		atomic.AddInt64(&entry.inFlight, -1)
+		atomic.StoreInt64(&entry.lastUsed, time.Now().UnixNano())
+	})
 	return resp, nil
 }
 

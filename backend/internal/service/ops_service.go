@@ -388,6 +388,12 @@ func SanitizeOpsErrorBodyForQueue(raw string) (string, bool) {
 	return sanitizeErrorBodyForStorage(raw, OpsErrorLogQueueBodyMaxBytes)
 }
 
+// SanitizeOpsErrorBodyFullForQueue redacts credential-bearing JSON fields but
+// preserves the complete error text for HTTP2WS lifecycle diagnostics.
+func SanitizeOpsErrorBodyFullForQueue(raw string) (string, bool) {
+	return sanitizeErrorBodyWithoutTruncation(raw)
+}
+
 // SanitizeOpsUpstreamErrorsForQueue bounds and serializes attempt-level data
 // before the entry can consume asynchronous queue capacity.
 func SanitizeOpsUpstreamErrorsForQueue(entry *OpsInsertErrorLogInput) error {
@@ -498,9 +504,15 @@ func (s *OpsService) prepareErrorLogInput(ctx context.Context, entry *OpsInsertE
 		break
 	}
 
-	// Sanitize + truncate error_body to avoid storing sensitive data.
+	// Sanitize error_body before persistence. HTTP2WS explicitly preserves the
+	// complete error text; all other paths retain the legacy bounded behavior.
 	if strings.TrimSpace(entry.ErrorBody) != "" {
-		sanitized, _ := sanitizeErrorBodyForStorage(entry.ErrorBody, opsMaxStoredErrorBodyBytes)
+		var sanitized string
+		if entry.PreserveFullErrorDetails {
+			sanitized, _ = sanitizeErrorBodyWithoutTruncation(entry.ErrorBody)
+		} else {
+			sanitized, _ = sanitizeErrorBodyForStorage(entry.ErrorBody, opsMaxStoredErrorBodyBytes)
+		}
 		entry.ErrorBody = sanitized
 	}
 
@@ -511,7 +523,9 @@ func (s *OpsService) prepareErrorLogInput(ctx context.Context, entry *OpsInsertE
 	if entry.UpstreamErrorMessage != nil {
 		msg := strings.TrimSpace(*entry.UpstreamErrorMessage)
 		msg = sanitizeUpstreamErrorMessage(msg)
-		msg = truncateString(msg, 2048)
+		if !entry.PreserveFullErrorDetails {
+			msg = truncateString(msg, 2048)
+		}
 		if strings.TrimSpace(msg) == "" {
 			entry.UpstreamErrorMessage = nil
 		} else {
@@ -523,7 +537,12 @@ func (s *OpsService) prepareErrorLogInput(ctx context.Context, entry *OpsInsertE
 		if detail == "" {
 			entry.UpstreamErrorDetail = nil
 		} else {
-			sanitized, _ := sanitizeErrorBodyForStorage(detail, opsMaxStoredErrorBodyBytes)
+			var sanitized string
+			if entry.PreserveFullErrorDetails {
+				sanitized, _ = sanitizeErrorBodyWithoutTruncation(detail)
+			} else {
+				sanitized, _ = sanitizeErrorBodyForStorage(detail, opsMaxStoredErrorBodyBytes)
+			}
 			if strings.TrimSpace(sanitized) == "" {
 				entry.UpstreamErrorDetail = nil
 			} else {
@@ -544,10 +563,12 @@ func sanitizeOpsUpstreamErrors(entry *OpsInsertErrorLogInput) error {
 		return nil
 	}
 
-	const maxEvents = 16
 	events := entry.UpstreamErrors
-	if len(events) > maxEvents {
-		events = events[len(events)-maxEvents:]
+	if !entry.PreserveFullErrorDetails {
+		const maxEvents = 16
+		if len(events) > maxEvents {
+			events = events[len(events)-maxEvents:]
+		}
 	}
 
 	sanitized := make([]*OpsUpstreamErrorEvent, 0, len(events))
@@ -562,11 +583,16 @@ func sanitizeOpsUpstreamErrors(entry *OpsInsertErrorLogInput) error {
 		out.UpstreamRequestID = truncateString(strings.TrimSpace(out.UpstreamRequestID), 128)
 		out.UpstreamURL = truncateString(strings.TrimSpace(out.UpstreamURL), 2048)
 		if body := strings.TrimSpace(out.UpstreamResponseBody); body != "" {
-			out.UpstreamResponseBody, _ = sanitizeErrorBodyForStorage(body, OpsErrorLogQueueBodyMaxBytes)
+			if entry.PreserveFullErrorDetails {
+				out.UpstreamResponseBody, _ = sanitizeErrorBodyWithoutTruncation(body)
+			} else {
+				out.UpstreamResponseBody, _ = sanitizeErrorBodyForStorage(body, OpsErrorLogQueueBodyMaxBytes)
+			}
 		} else {
 			out.UpstreamResponseBody = ""
 		}
 		out.Kind = truncateString(strings.TrimSpace(out.Kind), 64)
+		out.Event = truncateString(strings.TrimSpace(out.Event), 64)
 		out.Stage = truncateString(strings.TrimSpace(out.Stage), 64)
 		out.Scope = truncateString(strings.TrimSpace(out.Scope), 64)
 		out.Reason = truncateString(strings.TrimSpace(out.Reason), 128)
@@ -582,20 +608,26 @@ func sanitizeOpsUpstreamErrors(entry *OpsInsertErrorLogInput) error {
 		}
 
 		msg := sanitizeUpstreamErrorMessage(strings.TrimSpace(out.Message))
-		msg = truncateString(msg, 2048)
+		if !entry.PreserveFullErrorDetails {
+			msg = truncateString(msg, 2048)
+		}
 		out.Message = msg
 
 		detail := strings.TrimSpace(out.Detail)
 		if detail != "" {
-			// Keep upstream detail small while the event waits in the queue.
-			sanitizedDetail, _ := sanitizeErrorBodyForStorage(detail, OpsErrorLogQueueBodyMaxBytes)
+			var sanitizedDetail string
+			if entry.PreserveFullErrorDetails {
+				sanitizedDetail, _ = sanitizeErrorBodyWithoutTruncation(detail)
+			} else {
+				sanitizedDetail, _ = sanitizeErrorBodyForStorage(detail, OpsErrorLogQueueBodyMaxBytes)
+			}
 			out.Detail = sanitizedDetail
 		} else {
 			out.Detail = ""
 		}
 
 		// Drop fully-empty events (can happen if only status code was known).
-		if out.UpstreamStatusCode == 0 && out.Message == "" && out.Detail == "" {
+		if out.UpstreamStatusCode == 0 && out.Message == "" && out.Detail == "" && out.Event == "" {
 			continue
 		}
 
@@ -683,6 +715,44 @@ func (s *OpsService) GetErrorLogByID(ctx context.Context, id int64) (*OpsErrorLo
 		return nil, infraerrors.InternalServer("OPS_ERROR_LOAD_FAILED", "Failed to load ops error log").WithCause(err)
 	}
 	return detail, nil
+}
+
+func (s *OpsService) RecordErrorPayloadCapture(
+	ctx context.Context,
+	requestID string,
+	capture *OpsErrorPayloadCaptureSnapshot,
+) error {
+	if s == nil || s.cfg == nil || !s.cfg.Gateway.OpenAIWS.ErrorPayloadCaptureEnabled || capture == nil {
+		return nil
+	}
+	if s.opsRepo == nil {
+		return errors.New("ops repository is unavailable for error payload capture")
+	}
+	requestID = strings.TrimSpace(requestID)
+	if requestID == "" {
+		return errors.New("missing request id for error payload capture")
+	}
+	return s.opsRepo.InsertErrorPayloadCapture(ctx, requestID, capture)
+}
+
+func (s *OpsService) GetErrorPayloadContent(
+	ctx context.Context,
+	errorID, payloadID int64,
+) (*OpsErrorPayloadContent, error) {
+	if err := s.RequireMonitoringEnabled(ctx); err != nil {
+		return nil, err
+	}
+	if s.opsRepo == nil {
+		return nil, infraerrors.NotFound("OPS_ERROR_PAYLOAD_NOT_FOUND", "error payload not found")
+	}
+	payload, err := s.opsRepo.GetErrorPayloadContent(ctx, errorID, payloadID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, infraerrors.NotFound("OPS_ERROR_PAYLOAD_NOT_FOUND", "error payload not found")
+		}
+		return nil, infraerrors.InternalServer("OPS_ERROR_PAYLOAD_LOAD_FAILED", "Failed to load error payload").WithCause(err)
+	}
+	return payload, nil
 }
 
 // GetUserErrorRequestDetail 返回某用户自己某条错误请求的脱敏详情(含 error_body)。
@@ -1049,4 +1119,22 @@ func sanitizeErrorBodyForStorage(raw string, maxBytes int) (sanitized string, tr
 		return truncateString(raw, maxBytes), true
 	}
 	return raw, false
+}
+
+func sanitizeErrorBodyWithoutTruncation(raw string) (sanitized string, changed bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", false
+	}
+	var decoded any
+	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
+		return sanitizeUpstreamErrorMessage(raw), false
+	}
+	decoded = redactSensitiveJSON(decoded)
+	encoded, err := json.Marshal(decoded)
+	if err != nil {
+		return sanitizeUpstreamErrorMessage(raw), false
+	}
+	result := string(encoded)
+	return result, result != raw
 }

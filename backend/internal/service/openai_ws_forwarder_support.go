@@ -811,6 +811,40 @@ func openAIWSErrorHTTPStatus(message []byte) int {
 	return openAIWSErrorHTTPStatusFromRaw(codeRaw, errTypeRaw)
 }
 
+// isOpenAIWSRequestScopedErrorEvent identifies an upstream error that applies
+// to the current response.create only. Such errors must not evict a healthy
+// pooled connection; the official Responses WS protocol treats 400
+// invalid_request_error events as request-scoped failures.
+func isOpenAIWSRequestScopedErrorEvent(message []byte, codeRaw, errTypeRaw string) bool {
+	if len(message) == 0 {
+		return false
+	}
+	status := int(gjson.GetBytes(message, "status").Int())
+	if status == http.StatusBadRequest {
+		return true
+	}
+	errType := strings.ToLower(strings.TrimSpace(errTypeRaw))
+	code := strings.ToLower(strings.TrimSpace(codeRaw))
+	return strings.Contains(errType, "invalid_request") ||
+		code == "invalid_request" ||
+		code == "previous_response_not_found" ||
+		code == "invalid_stream_id"
+}
+
+func openAIWSCapacityRetryDelay(retryCount int) time.Duration {
+	if retryCount < 1 {
+		return 0
+	}
+	delay := 500 * time.Millisecond
+	for i := 1; i < retryCount && delay < 8*time.Second; i++ {
+		delay *= 2
+	}
+	if delay > 8*time.Second {
+		return 8 * time.Second
+	}
+	return delay
+}
+
 func (s *OpenAIGatewayService) openAIWSFallbackCooldown() time.Duration {
 	if s == nil || s.cfg == nil {
 		return 30 * time.Second

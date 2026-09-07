@@ -251,6 +251,9 @@ type OpenAIWSIngressHooks struct {
 	// before channel or account mapping. Ingress modes preserve it for usage
 	// attribution while MapRequestModel determines the upstream model.
 	InitialRequestModel string
+	// InitialTurnOrdinal preserves the client session's global turn number when
+	// a replay-safe later turn resumes on a newly selected account.
+	InitialTurnOrdinal int
 	// InitialTurnStartedAt freezes when the first response.create was accepted.
 	InitialTurnStartedAt time.Time
 	// MaxReasoningEffort limits explicit reasoning effort values for this WS session.
@@ -284,7 +287,7 @@ func (s *OpenAIGatewayService) getOpenAIWSPassthroughDialer() openAIWSClientDial
 	}
 	s.openaiWSPassthroughDialerOnce.Do(func() {
 		if s.openaiWSPassthroughDialer == nil {
-			s.openaiWSPassthroughDialer = newDefaultOpenAIWSClientDialer()
+			s.openaiWSPassthroughDialer = newConfiguredOpenAIWSClientDialer(s.cfg)
 		}
 	})
 	return s.openaiWSPassthroughDialer

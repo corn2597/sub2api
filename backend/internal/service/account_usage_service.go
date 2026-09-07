@@ -303,6 +303,15 @@ type AccountUsageService struct {
 	tlsFPProfileService     *TLSFingerprintProfileService
 	agentIdentityTaskMu     sync.Mutex
 	agentIdentityWS         agentIdentityWSConnectionInvalidator
+	httpUpstream            HTTPUpstream
+}
+
+func (s *AccountUsageService) agentIdentityTaskRequestDoer(req *http.Request, proxyURL string, account *Account) (*http.Response, error) {
+	if s == nil || s.httpUpstream == nil || account == nil {
+		return nil, fmt.Errorf("OpenAI account-usage upstream is unavailable")
+	}
+	req = req.WithContext(WithHTTPUpstreamProfile(req.Context(), HTTPUpstreamProfileOpenAI))
+	return s.httpUpstream.Do(req, proxyURL, account.ID, account.Concurrency)
 }
 
 // NewAccountUsageService 创建AccountUsageService实例
@@ -318,6 +327,7 @@ func NewAccountUsageService(
 	cache *UsageCache,
 	identityCache IdentityCache,
 	tlsFPProfileService *TLSFingerprintProfileService,
+	httpUpstream HTTPUpstream,
 ) *AccountUsageService {
 	return &AccountUsageService{
 		accountRepo:             accountRepo,
@@ -331,6 +341,7 @@ func NewAccountUsageService(
 		cache:                   cache,
 		identityCache:           identityCache,
 		tlsFPProfileService:     tlsFPProfileService,
+		httpUpstream:            httpUpstream,
 	}
 }
 
@@ -855,7 +866,7 @@ func (s *AccountUsageService) probeOpenAICodexSnapshot(ctx context.Context, acco
 	req.Host = "chatgpt.com"
 	req.Header.Set("Content-Type", "application/json")
 	if account.IsOpenAIAgentIdentity() {
-		authHeaders, authErr := buildAgentIdentityAuthenticationHeaders(ctx, s.accountRepo, s.agentIdentityWS, &s.agentIdentityTaskMu, account)
+		authHeaders, authErr := buildAgentIdentityAuthenticationHeaders(ctx, s.accountRepo, s.agentIdentityWS, &s.agentIdentityTaskMu, account, s.agentIdentityTaskRequestDoer)
 		if authErr != nil {
 			return nil, fmt.Errorf("build Agent Identity authentication: %w", authErr)
 		}
@@ -888,15 +899,19 @@ func (s *AccountUsageService) probeOpenAICodexSnapshot(ctx context.Context, acco
 	if account.ProxyID != nil && account.Proxy != nil {
 		proxyURL = account.Proxy.URL()
 	}
-	client, err := httppool.GetClient(httppool.Options{
-		ProxyURL:              proxyURL,
-		Timeout:               15 * time.Second,
-		ResponseHeaderTimeout: 10 * time.Second,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("build openai probe client: %w", err)
+	var resp *http.Response
+	if s.httpUpstream != nil {
+		req = req.WithContext(WithHTTPUpstreamProfile(req.Context(), HTTPUpstreamProfileOpenAI))
+		resp, err = s.httpUpstream.Do(req, proxyURL, account.ID, account.Concurrency)
+	} else {
+		client, clientErr := httppool.GetClient(httppool.Options{
+			ProxyURL: proxyURL, Timeout: 15 * time.Second, ResponseHeaderTimeout: 10 * time.Second,
+		})
+		if clientErr != nil {
+			return nil, fmt.Errorf("build openai probe client: %w", clientErr)
+		}
+		resp, err = client.Do(req)
 	}
-	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("openai codex probe request failed: %w", err)
 	}

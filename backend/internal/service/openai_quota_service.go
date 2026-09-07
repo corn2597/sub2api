@@ -490,7 +490,21 @@ func (s *OpenAIQuotaService) recoverAgentIdentityTask(ctx context.Context, accou
 	if !account.IsOpenAIAgentIdentity() {
 		return nil
 	}
-	return ensureAgentIdentityTaskForAccount(ctx, s.accountRepo, s.agentIdentityWS, &s.agentIdentityTaskMu, account, expectedTaskID)
+	if s.privacyClientFactory == nil {
+		return ensureAgentIdentityTaskForAccount(ctx, s.accountRepo, s.agentIdentityWS, &s.agentIdentityTaskMu, account, expectedTaskID)
+	}
+	return ensureAgentIdentityTaskForAccount(ctx, s.accountRepo, s.agentIdentityWS, &s.agentIdentityTaskMu, account, expectedTaskID, s.agentIdentityTaskRequestDoer)
+}
+
+func (s *OpenAIQuotaService) agentIdentityTaskRequestDoer(req *http.Request, proxyURL string, _ *Account) (*http.Response, error) {
+	if s == nil || s.privacyClientFactory == nil {
+		return nil, fmt.Errorf("OpenAI management client is unavailable")
+	}
+	client, err := s.privacyClientFactory(proxyURL)
+	if err != nil {
+		return nil, err
+	}
+	return client.Do(req)
 }
 
 func (s *OpenAIQuotaService) isAgentIdentityAccount(ctx context.Context, accountID int64) bool {

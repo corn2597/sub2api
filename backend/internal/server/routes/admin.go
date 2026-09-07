@@ -241,6 +241,7 @@ func registerOpsRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		// Error logs (legacy)
 		ops.GET("/errors", h.Admin.Ops.GetErrorLogs)
 		ops.GET("/errors/:id", h.Admin.Ops.GetErrorLogByID)
+		ops.GET("/errors/:id/payloads/:payload_id", h.Admin.Ops.DownloadErrorPayload)
 		ops.PUT("/errors/:id/resolve", h.Admin.Ops.UpdateErrorResolution)
 
 		// Request errors (client-visible failures)
@@ -594,6 +595,10 @@ func registerSettingsRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		adminSettings.PUT("/web-search-emulation", h.Admin.Setting.UpdateWebSearchEmulationConfig)
 		adminSettings.POST("/web-search-emulation/test", h.Admin.Setting.TestWebSearchEmulation)
 		adminSettings.POST("/web-search-emulation/reset-usage", h.Admin.Setting.ResetWebSearchUsage)
+		// OpenAI Bun egress sidecar runtime switches and health check
+		adminSettings.GET("/openai-egress", h.Admin.Setting.GetOpenAIEgressSettings)
+		adminSettings.PUT("/openai-egress", h.Admin.Setting.UpdateOpenAIEgressSettings)
+		adminSettings.POST("/openai-egress/test", h.Admin.Setting.TestOpenAIEgress)
 	}
 }
 

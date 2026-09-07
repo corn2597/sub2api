@@ -13,6 +13,27 @@ type accountUsageCodexProbeRepo struct {
 	rateLimitCh   chan time.Time
 }
 
+func TestNewAccountUsageServiceInjectsHTTPUpstream(t *testing.T) {
+	marker := &httpUpstreamStub{}
+	service := NewAccountUsageService(
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		marker,
+	)
+	if service == nil || service.httpUpstream != marker {
+		t.Fatal("expected account usage service to retain the HTTP upstream dependency")
+	}
+}
+
 func (r *accountUsageCodexProbeRepo) UpdateExtra(_ context.Context, _ int64, updates map[string]any) error {
 	if r.updateExtraCh != nil {
 		copied := make(map[string]any, len(updates))

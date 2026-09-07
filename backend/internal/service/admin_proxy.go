@@ -315,7 +315,17 @@ func (s *adminServiceImpl) CheckProxyQuality(ctx context.Context, id int64) (*Pr
 	}
 
 	for _, target := range proxyQualityTargets {
-		item := runProxyQualityTarget(ctx, client, target)
+		targetClient := proxyQualityHTTPDoer(client)
+		if target.Target == "openai" && s.privacyClientFactory != nil {
+			if openAIClient, openAIErr := s.privacyClientFactory(proxyURL); openAIErr == nil {
+				targetClient = openAIClient
+			} else {
+				result.Items = append(result.Items, ProxyQualityCheckItem{Target: target.Target, Status: "fail", Message: fmt.Sprintf("创建 OpenAI 出站客户端失败: %v", openAIErr)})
+				result.FailedCount++
+				continue
+			}
+		}
+		item := runProxyQualityTarget(ctx, targetClient, target)
 		result.Items = append(result.Items, item)
 		switch item.Status {
 		case "pass":
@@ -334,7 +344,11 @@ func (s *adminServiceImpl) CheckProxyQuality(ctx context.Context, id int64) (*Pr
 	return result, nil
 }
 
-func runProxyQualityTarget(ctx context.Context, client *http.Client, target proxyQualityTarget) ProxyQualityCheckItem {
+type proxyQualityHTTPDoer interface {
+	Do(*http.Request) (*http.Response, error)
+}
+
+func runProxyQualityTarget(ctx context.Context, client proxyQualityHTTPDoer, target proxyQualityTarget) ProxyQualityCheckItem {
 	item := ProxyQualityCheckItem{
 		Target: target.Target,
 	}

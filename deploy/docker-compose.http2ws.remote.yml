@@ -1,0 +1,53 @@
+services:
+  sub2api:
+    image: sub2api-http2ws-main@sha256:f70e1ca10cb5bc011469433d6a6cc564c889ddc5d6bf338eddf39bd58b9d03a3
+    depends_on:
+      opencode-egress:
+        condition: service_healthy
+    environment:
+      GATEWAY_OPENAI_WS_ENABLED: "true"
+      GATEWAY_OPENAI_WS_MODE_ROUTER_V2_ENABLED: "true"
+      GATEWAY_OPENAI_WS_RESPONSES_WEBSOCKETS_V2: "true"
+      GATEWAY_OPENAI_WS_HTTP_TO_WS_ENABLED: "true"
+      GATEWAY_OPENAI_WS_OAUTH_ENABLED: "true"
+      GATEWAY_OPENAI_WS_FORCE_HTTP: "false"
+      GATEWAY_OPENAI_WS_CLIENT_READ_LIMIT_BYTES: "268435456"
+      GATEWAY_OPENAI_WS_EGRESS_MESSAGE_LIMIT_BYTES: "268435456"
+      GATEWAY_OPENAI_WS_LARGE_MESSAGE_THRESHOLD_BYTES: "33554432"
+      GATEWAY_OPENAI_WS_LARGE_MESSAGE_MAX_INFLIGHT: "1"
+      GATEWAY_OPENAI_EGRESS_ENABLED: "true"
+      GATEWAY_OPENAI_EGRESS_BASE_URL: "http://opencode-egress:12783"
+      GATEWAY_OPENAI_EGRESS_SHARED_SECRET: "${SUB2API_EGRESS_SECRET:?SUB2API_EGRESS_SECRET is required}"
+      GATEWAY_OPENAI_EGRESS_CONTROL_TIMEOUT_SECONDS: "120"
+      GATEWAY_OPENAI_EGRESS_HTTP_ENABLED: "true"
+      GATEWAY_OPENAI_EGRESS_WS_ENABLED: "true"
+      GATEWAY_OPENAI_EGRESS_OAUTH_ENABLED: "true"
+      GATEWAY_OPENAI_EGRESS_ALLOW_PROXY: "true"
+      GATEWAY_OPENAI_EGRESS_FALLBACK_TO_DIRECT: "false"
+
+  opencode-egress:
+    image: sub2api-opencode-egress@sha256:b009adc0378cba5c3fe8033074216e6f4fcc38a66346db98d3bd8e16ba9d7de2
+    container_name: sub2api-opencode-egress
+    restart: unless-stopped
+    expose:
+      - "12783"
+    environment:
+      SUB2API_EGRESS_BIND: "0.0.0.0"
+      SUB2API_EGRESS_PORT: "12783"
+      SUB2API_EGRESS_SECRET: "${SUB2API_EGRESS_SECRET:?SUB2API_EGRESS_SECRET is required}"
+      SUB2API_EGRESS_WS_MAX_PAYLOAD_BYTES: "268500992"
+      SUB2API_EGRESS_WS_BACKPRESSURE_BYTES: "16777216"
+      SUB2API_EGRESS_AUDIT_LOG: "true"
+      OPENCODE_VERSION: "1.18.20"
+    networks:
+      - sub2api-network
+    healthcheck:
+      test:
+        - CMD
+        - bun
+        - -e
+        - "fetch('http://127.0.0.1:12783/health',{headers:{'x-sub2api-egress-secret':process.env.SUB2API_EGRESS_SECRET}}).then(r=>{if(!r.ok) process.exit(1)}).catch(()=>process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s

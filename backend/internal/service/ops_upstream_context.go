@@ -12,11 +12,12 @@ import (
 // Gin context keys used by Ops error logger for capturing upstream error details.
 // These keys are set by gateway services and consumed by handler/ops_error_logger.go.
 const (
-	OpsUpstreamStatusCodeKey   = "ops_upstream_status_code"
-	OpsUpstreamErrorMessageKey = "ops_upstream_error_message"
-	OpsUpstreamErrorDetailKey  = "ops_upstream_error_detail"
-	OpsUpstreamErrorsKey       = "ops_upstream_errors"
-	OpsUpstreamModelKey        = "ops_upstream_model"
+	OpsUpstreamStatusCodeKey     = "ops_upstream_status_code"
+	OpsUpstreamErrorMessageKey   = "ops_upstream_error_message"
+	OpsUpstreamErrorDetailKey    = "ops_upstream_error_detail"
+	OpsUpstreamErrorsKey         = "ops_upstream_errors"
+	OpsRequestLifecycleEventsKey = "ops_request_lifecycle_events"
+	OpsUpstreamModelKey          = "ops_upstream_model"
 
 	// Optional stage latencies (milliseconds) for troubleshooting and alerting.
 	OpsAuthLatencyMsKey      = "ops_auth_latency_ms"
@@ -42,6 +43,12 @@ const (
 	OpsStreamErrorsKey = "ops_stream_errors"
 	OpsStreamTurnKey   = "ops_stream_turn"
 
+	// OpsPreserveFullErrorDetailsKey marks HTTP2WS requests whose upstream error
+	// metadata must be persisted without the legacy diagnostic truncation caps.
+	// Request payloads are still excluded by the handler; this only applies to
+	// error code/type/message/detail fields and captured upstream error text.
+	OpsPreserveFullErrorDetailsKey = "ops_preserve_full_error_details"
+
 	// Client-side configuration denials should remain visible in ops_error_logs,
 	// but should be excluded from SLA/error-rate calculations.
 	// ResponseCommittedKey 由 handleErrorResponse 系列函数在写完 HTTP 错误响应后设置。
@@ -59,6 +66,21 @@ const (
 )
 
 func MarkResponseCommitted(c *gin.Context) { c.Set(ResponseCommittedKey, true) }
+
+func MarkOpsPreserveFullErrorDetails(c *gin.Context) {
+	if c != nil {
+		c.Set(OpsPreserveFullErrorDetailsKey, true)
+	}
+}
+
+func PreserveFullOpsErrorDetails(c *gin.Context) bool {
+	if c == nil {
+		return false
+	}
+	v, ok := c.Get(OpsPreserveFullErrorDetailsKey)
+	flag, _ := v.(bool)
+	return ok && flag
+}
 
 func IsResponseCommitted(c *gin.Context) bool {
 	v, ok := c.Get(ResponseCommittedKey)
@@ -378,6 +400,10 @@ type OpsUpstreamErrorEvent struct {
 
 	// Kind: http_error | request_error | retry_exhausted | failover
 	Kind string `json:"kind,omitempty"`
+	// Event is populated for request lifecycle markers (kind=lifecycle). It is
+	// intentionally separate from Reason so the UI can distinguish a stage from
+	// an upstream failure without storing the request payload.
+	Event string `json:"event,omitempty"`
 	// Stage/Scope/Reason distinguish credential acquisition from inference
 	// without overloading upstream_status_code with a synthetic HTTP status.
 	Stage  string `json:"stage,omitempty"`
@@ -392,6 +418,101 @@ type OpsUpstreamErrorEvent struct {
 	// the final client-visible failure; recovered attempts remain provider-health
 	// telemetry and do not count as failed requests.
 	SkipMonitoring bool `json:"-"`
+}
+
+// OpsRequestLifecycleEvent is a payload-free stage marker for HTTP2WS
+// diagnostics. It is merged into upstream_errors only when the request has a
+// visible error, so successful usage rows retain their existing shape.
+type OpsRequestLifecycleEvent struct {
+	AtUnixMs    int64  `json:"at_unix_ms,omitempty"`
+	Event       string `json:"event"`
+	Outcome     string `json:"outcome,omitempty"`
+	Scope       string `json:"scope,omitempty"`
+	Reason      string `json:"reason,omitempty"`
+	AccountID   int64  `json:"account_id,omitempty"`
+	ConnID      string `json:"conn_id,omitempty"`
+	Attempt     int    `json:"attempt,omitempty"`
+	Retry       int    `json:"retry,omitempty"`
+	HTTPStatus  int    `json:"http_status,omitempty"`
+	ErrorStatus int    `json:"error_status,omitempty"`
+}
+
+// AppendOpsRequestLifecycleEvent records a bounded, payload-free lifecycle
+// marker on the request context. The event name is normalized and empty names
+// are ignored so accidental callers cannot create unbounded noise.
+func AppendOpsRequestLifecycleEvent(c *gin.Context, event OpsRequestLifecycleEvent) {
+	if c == nil {
+		return
+	}
+	event.Event = strings.TrimSpace(event.Event)
+	if event.Event == "" {
+		return
+	}
+	if event.AtUnixMs <= 0 {
+		event.AtUnixMs = time.Now().UnixMilli()
+	}
+	event.Outcome = strings.TrimSpace(event.Outcome)
+	event.Scope = strings.TrimSpace(event.Scope)
+	event.Reason = strings.TrimSpace(event.Reason)
+	event.ConnID = strings.TrimSpace(event.ConnID)
+	if len(event.Event) > 64 {
+		event.Event = event.Event[:64]
+	}
+	if len(event.Outcome) > 64 {
+		event.Outcome = event.Outcome[:64]
+	}
+	if len(event.Scope) > 64 {
+		event.Scope = event.Scope[:64]
+	}
+	if len(event.Reason) > 256 {
+		event.Reason = event.Reason[:256]
+	}
+	if len(event.ConnID) > 128 {
+		event.ConnID = event.ConnID[:128]
+	}
+	if event.AccountID < 0 {
+		event.AccountID = 0
+	}
+	if event.Attempt < 0 {
+		event.Attempt = 0
+	}
+	if event.Retry < 0 {
+		event.Retry = 0
+	}
+	if event.HTTPStatus < 0 {
+		event.HTTPStatus = 0
+	}
+	if event.ErrorStatus < 0 {
+		event.ErrorStatus = 0
+	}
+	var existing []OpsRequestLifecycleEvent
+	if value, ok := c.Get(OpsRequestLifecycleEventsKey); ok {
+		if events, ok := value.([]OpsRequestLifecycleEvent); ok {
+			existing = events
+		}
+	}
+	// A single HTTP2WS request can have many upstream frames, but lifecycle
+	// markers remain small. Keep a hard cap to protect the gin context.
+	if len(existing) >= 128 {
+		existing = existing[len(existing)-127:]
+	}
+	existing = append(existing, event)
+	c.Set(OpsRequestLifecycleEventsKey, existing)
+}
+
+func GetOpsRequestLifecycleEvents(c *gin.Context) []OpsRequestLifecycleEvent {
+	if c == nil {
+		return nil
+	}
+	value, ok := c.Get(OpsRequestLifecycleEventsKey)
+	if !ok {
+		return nil
+	}
+	events, ok := value.([]OpsRequestLifecycleEvent)
+	if !ok || len(events) == 0 {
+		return nil
+	}
+	return append([]OpsRequestLifecycleEvent(nil), events...)
 }
 
 func appendOpsUpstreamError(c *gin.Context, ev OpsUpstreamErrorEvent) {

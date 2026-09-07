@@ -1,0 +1,20 @@
+ARG BUN_IMAGE=oven/bun:1.3.14
+FROM ${BUN_IMAGE}
+
+WORKDIR /app
+
+COPY package.json bun.lock ./
+RUN bun install --frozen-lockfile --production
+
+COPY src ./src
+
+ENV SUB2API_EGRESS_BIND=0.0.0.0 \
+    SUB2API_EGRESS_PORT=12783 \
+    SUB2API_EGRESS_WS_MAX_PAYLOAD_BYTES=268500992 \
+    SUB2API_EGRESS_WS_BACKPRESSURE_BYTES=16777216 \
+    SUB2API_EGRESS_WS_FRAGMENT_BYTES=1048576 \
+    OPENCODE_VERSION=1.18.20
+
+EXPOSE 12783
+
+CMD ["bun", "run", "src/index.ts"]

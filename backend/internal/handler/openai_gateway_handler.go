@@ -396,6 +396,11 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Request body is empty")
 		return
 	}
+	if h.cfg != nil && h.cfg.Gateway.OpenAIWS.ErrorPayloadCaptureEnabled {
+		// Keep the exact ingress bytes before compact normalization, policy caps,
+		// model mapping, or any OpenAI/Codex compatibility transformation.
+		service.SetOpsHTTPErrorPayloadCandidate(c, body)
+	}
 
 	setOpsRequestContext(c, "", false)
 	sessionHashBody := body
@@ -587,6 +592,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	profitVetoCount := 0
 	failedAccountIDs := make(map[int64]struct{})
 	sameAccountRetryCount := make(map[int64]int)
+	var forcedRetryAccountID int64
 	var lastFailoverErr *service.UpstreamFailoverError
 	var oauth429FailoverState service.OpenAIOAuth429FailoverState
 	var passthroughFailoverState openAIPassthroughFailoverState
@@ -615,8 +621,12 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		}
 		// Select account supporting the requested model
 		reqLog.Debug("openai.account_selecting", zap.Int("excluded_account_count", len(failedAccountIDs)))
+		selectionCtx := c.Request.Context()
+		if forcedRetryAccountID > 0 {
+			selectionCtx = service.WithOpenAIForcedRetryAccount(selectionCtx, forcedRetryAccountID)
+		}
 		selection, scheduleDecision, err := h.gatewayService.SelectAccountWithSchedulerForCapability(
-			c.Request.Context(),
+			selectionCtx,
 			apiKey.GroupID,
 			previousResponseID,
 			sessionHash,
@@ -629,6 +639,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			!imageIntent,
 			requestPlatform,
 		)
+		forcedRetryAccountID = 0
 		if err != nil {
 			if failoverClientGone(c) {
 				reqLog.Info("openai.account_select_aborted_client_disconnected", zap.Error(err))
@@ -830,6 +841,24 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 					if failoverErr.ShouldReportAccountScheduleFailure() {
 						h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, forwardModel, requireCompact, nil), false, nil, err)
 					}
+					// Capacity shedding is request-scoped: retrying the same request
+					// against another account does not remove the overloaded condition,
+					// and replaying it across the pool only amplifies load.  Return a
+					// client-retryable server_error instead of doing an internal retry
+					// or account switch.
+					if failoverErr.RequestScopedTransient {
+						failoverErr.RetryableOnSameAccount = false
+						failoverErr.NextAccountAction = service.NextAccountStop
+						service.AppendOpsRequestLifecycleEvent(c, service.OpsRequestLifecycleEvent{
+							Event:     "capacity_shed_returned_to_client",
+							Outcome:   "client_retry",
+							Scope:     "request",
+							Reason:    string(failoverErr.Reason),
+							AccountID: account.ID,
+						})
+						h.handleFailoverExhausted(c, failoverErr, streamStarted)
+						return
+					}
 					if !failoverErr.ShouldRetryNextAccount() {
 						h.handleFailoverExhausted(c, failoverErr, streamStarted)
 						return
@@ -843,6 +872,8 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 						retryLimit := effectiveSameAccountRetryLimit(failoverErr, account)
 						if sameAccountRetryAllowed(failoverErr, sameAccountRetryCount[account.ID], retryLimit) {
 							sameAccountRetryCount[account.ID]++
+							forcedRetryAccountID = account.ID
+							service.AppendOpsRequestLifecycleEvent(c, service.OpsRequestLifecycleEvent{Event: "same_account_retry", Outcome: "retry", Scope: "request", Reason: string(failoverErr.Reason), AccountID: account.ID, Retry: sameAccountRetryCount[account.ID]})
 							retryDelay := sameAccountRetryDelayFor(failoverErr, sameAccountRetryCount[account.ID])
 							reqLog.Warn("openai.pool_mode_same_account_retry",
 								zap.Int64("account_id", account.ID),
@@ -857,6 +888,13 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 							case <-time.After(retryDelay):
 							}
 							continue
+						}
+						if failoverErr.RequestScopedTransient {
+							failoverErr.RetryableOnSameAccount = false
+							failoverErr.NextAccountAction = service.NextAccountStop
+							service.AppendOpsRequestLifecycleEvent(c, service.OpsRequestLifecycleEvent{Event: "retry_exhausted", Outcome: "returned_to_client", Scope: "request", Reason: string(failoverErr.Reason), AccountID: account.ID, Retry: sameAccountRetryCount[account.ID]})
+							h.handleFailoverExhausted(c, failoverErr, streamStarted)
+							return
 						}
 					}
 					h.gatewayService.RecordOpenAIAccountSwitch()
@@ -2789,6 +2827,11 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			}
 			var failoverErr *service.UpstreamFailoverError
 			if errors.As(err, &failoverErr) {
+				if failoverErr.ClientResponseWritten {
+					releaseAccountSlot()
+					closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, "upstream capacity unavailable; please retry")
+					return
+				}
 				retryPayload, retryCurrentTurn := service.OpenAIWSCurrentTurnRetryPayload(err)
 				nextAttemptMessage, retrySafe := openAIWSNextAttemptMessage(wsAttemptMessage, retryPayload, retryCurrentTurn)
 				if !retrySafe {
@@ -3254,6 +3297,28 @@ func (h *OpenAIGatewayHandler) handleStreamingAwareErrorWithCode(
 	// happens-before，接管 ResponseWriter），并升级为流内错误处理。
 	if service.StopOpenAICompactSSEKeepaliveCommitted(c) {
 		streamStarted = true
+	}
+	if service.PreserveFullOpsErrorDetails(c) {
+		outcome := "json_error"
+		clientHTTPStatus := status
+		if streamStarted {
+			outcome = "sse_error"
+			clientHTTPStatus = c.Writer.Status()
+			if clientHTTPStatus <= 0 {
+				clientHTTPStatus = http.StatusOK
+			}
+		}
+		service.AppendOpsRequestLifecycleEvent(c, service.OpsRequestLifecycleEvent{
+			Event:       "client_response_finalized",
+			Outcome:     outcome,
+			Scope:       "client",
+			Reason:      strconv.Itoa(clientHTTPStatus),
+			HTTPStatus:  clientHTTPStatus,
+			ErrorStatus: status,
+		})
+		service.AppendOpsRequestLifecycleEvent(c, service.OpsRequestLifecycleEvent{
+			Event: "request_completed", Outcome: "failed", Scope: "request", Reason: errType,
+		})
 	}
 	if streamStarted {
 		if countTowardsSLA {

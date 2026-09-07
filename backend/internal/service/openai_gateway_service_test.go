@@ -124,7 +124,7 @@ func TestOpenAIGatewayService_ForwardAsAnthropic_CapacityShedReturnsRequestScope
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
 	c.Request.Header.Set("Content-Type", "application/json")
 
-	upstreamBody := []byte(`{"error":{"message":"Our servers are currently overloaded. Please try again later."}}`)
+	upstreamBody := []byte(`{"error":{"message":"Deployment is temporarily warming up. Please try again later."}}`)
 	upstream := &httpUpstreamRecorder{responses: []*http.Response{
 		{
 			StatusCode: http.StatusBadRequest,
@@ -161,7 +161,7 @@ func TestOpenAIGatewayService_ForwardAsAnthropic_CapacityShedReturnsRequestScope
 			"temp_unschedulable_enabled": true,
 			"temp_unschedulable_rules": []any{map[string]any{
 				"error_code":       float64(http.StatusBadRequest),
-				"keywords":         []any{"our servers are currently overloaded", "please try again later"},
+				"keywords":         []any{"deployment is temporarily warming up", "please try again later"},
 				"duration_minutes": float64(1),
 			}},
 		},
@@ -195,7 +195,7 @@ func TestOpenAIGatewayService_ForwardAsAnthropic_CapacityShedReturnsRequestScope
 	require.NotEmpty(t, secondRec.Body.String())
 }
 
-func TestFailoverOpenAIUpstreamHTTPError_NilContextSkipsTempUnschedulablePolicy(t *testing.T) {
+func TestFailoverOpenAIUpstreamHTTPError_NilContextCapacityShedSkipsTempUnschedulablePolicy(t *testing.T) {
 	repo := &tempUnschedulableOpenAIAccountRepo{}
 	svc := &OpenAIGatewayService{
 		rateLimitService: NewRateLimitService(repo, nil, &config.Config{}, nil, nil),
@@ -219,7 +219,9 @@ func TestFailoverOpenAIUpstreamHTTPError_NilContextSkipsTempUnschedulablePolicy(
 		"Custom temporary outage.", "gpt-5.4",
 	)
 
-	require.Nil(t, got)
+	require.NotNil(t, got)
+	require.True(t, got.RetryableOnSameAccount)
+	require.True(t, got.RequestScopedTransient)
 	require.Zero(t, repo.modelRateLimitAccountID)
 	require.Empty(t, repo.modelRateLimitKey)
 }

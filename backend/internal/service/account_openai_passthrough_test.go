@@ -324,3 +324,22 @@ func TestAccount_OpenAIWSExtraFlags(t *testing.T) {
 	}
 	require.False(t, nonOpenAI.IsOpenAIWSAllowStoreRecoveryEnabled())
 }
+
+func TestAccount_IsOpenAIOAuthHTTPToWSEnabled(t *testing.T) {
+	oauth := &Account{
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeOAuth,
+		Extra:    map[string]any{"openai_oauth_http_to_ws_enabled": true},
+	}
+	require.True(t, oauth.IsOpenAIOAuthHTTPToWSEnabled())
+
+	oauth.Extra["openai_oauth_http_to_ws_enabled"] = "true"
+	require.False(t, oauth.IsOpenAIOAuthHTTPToWSEnabled())
+
+	apiKey := &Account{
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeAPIKey,
+		Extra:    map[string]any{"openai_oauth_http_to_ws_enabled": true},
+	}
+	require.False(t, apiKey.IsOpenAIOAuthHTTPToWSEnabled())
+}

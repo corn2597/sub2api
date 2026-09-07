@@ -1,8 +1,13 @@
 package service
 
 import (
+	"context"
+	"database/sql/driver"
 	"testing"
 	"time"
+
+	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/Wei-Shaw/sub2api/internal/config"
 )
 
 func TestOpsCleanupPlan(t *testing.T) {
@@ -56,6 +61,78 @@ func TestIsMissingRelationError(t *testing.T) {
 				t.Fatalf("got %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+type timeWithin struct {
+	target    time.Time
+	tolerance time.Duration
+}
+
+func (m timeWithin) Match(value driver.Value) bool {
+	got, ok := value.(time.Time)
+	if !ok {
+		return false
+	}
+	delta := got.Sub(m.target)
+	if delta < 0 {
+		delta = -delta
+	}
+	return delta <= m.tolerance
+}
+
+func TestRunErrorPayloadCleanupOnceUsesIndependentHourlyRetention(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	cfg := &config.Config{}
+	cfg.Gateway.OpenAIWS.ErrorPayloadRetentionHours = 72
+	svc := &OpsCleanupService{db: db, cfg: cfg}
+	wantCutoff := time.Now().UTC().Add(-72 * time.Hour)
+	cutoff := timeWithin{target: wantCutoff, tolerance: 5 * time.Second}
+	mock.ExpectExec("DELETE FROM ops_error_payload_blobs").
+		WithArgs(cutoff, opsCleanupBatchSize).
+		WillReturnResult(sqlmock.NewResult(0, 2))
+	mock.ExpectExec("DELETE FROM ops_error_payload_blobs").
+		WithArgs(cutoff, opsCleanupBatchSize).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	deleted, err := svc.runErrorPayloadCleanupOnce(context.Background())
+	if err != nil {
+		t.Fatalf("runErrorPayloadCleanupOnce: %v", err)
+	}
+	if deleted != 2 {
+		t.Fatalf("deleted = %d, want 2", deleted)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("sql expectations: %v", err)
+	}
+}
+
+func TestApplyScheduleKeepsPayloadCleanupWhenMetadataCleanupDisabled(t *testing.T) {
+	db, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+	cfg := &config.Config{}
+	cfg.Gateway.OpenAIWS.ErrorPayloadRetentionHours = 72
+	cfg.Ops.Cleanup.Enabled = false
+	svc := &OpsCleanupService{db: db, cfg: cfg}
+
+	if err := svc.applyScheduleLocked(context.Background()); err != nil {
+		t.Fatalf("applyScheduleLocked: %v", err)
+	}
+	defer svc.stopCronLocked()
+	if svc.cron == nil {
+		t.Fatal("payload cleanup cron was not created")
+	}
+	entries := svc.cron.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("cron entries = %d, want payload-only entry", len(entries))
 	}
 }
 

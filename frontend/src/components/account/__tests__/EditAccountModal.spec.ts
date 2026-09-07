@@ -1206,6 +1206,34 @@ describe('EditAccountModal', () => {
     expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.openai_oauth_responses_websockets_v2_enabled).toBe(true)
   })
 
+  it('device fingerprint seed count loads, disables outside device mode, and persists', async () => {
+    const account = buildOpenAIOAuthParentAccount()
+    account.extra = {
+      codex_fingerprint_mode: 'device',
+      codex_fingerprint_seed_count: 5
+    }
+    updateAccountMock.mockReset()
+    checkMixedChannelRiskMock.mockReset()
+    checkMixedChannelRiskMock.mockResolvedValue({ has_risk: false })
+    updateAccountMock.mockResolvedValue(account)
+
+    const wrapper = mountModal(account)
+    const countInput = wrapper.get('[data-testid="edit-codex-fingerprint-seed-count"]')
+    expect((countInput.element as HTMLInputElement).value).toBe('5')
+    expect((countInput.element as HTMLInputElement).disabled).toBe(false)
+
+    await wrapper.get('[data-testid="edit-codex-fingerprint-mode-select"]').setValue('session')
+    expect((countInput.element as HTMLInputElement).disabled).toBe(true)
+
+    await wrapper.get('[data-testid="edit-codex-fingerprint-mode-select"]').setValue('device')
+    await countInput.setValue(7)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.codex_fingerprint_mode).toBe('device')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.codex_fingerprint_seed_count).toBe(7)
+  })
+
   it('allows saving apikey account when backend redacted api_key but credentials_status reports it exists', async () => {
     // 新前端 + 新后端：响应已脱敏，credentials 里没有 api_key，credentials_status.has_api_key=true
     const account = buildAccount()
