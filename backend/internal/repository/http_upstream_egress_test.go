@@ -36,7 +36,7 @@ func TestHTTPUpstreamRoutesOfficialOpenAIHostThroughEgressWithoutProfile(t *test
 	require.NoError(t, err)
 	resp, err := upstream.Do(req, "", 7, 1)
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	require.Same(t, req, resp.Request)
 }

@@ -86,7 +86,7 @@ func TestRunErrorPayloadCleanupOnceUsesIndependentHourlyRetention(t *testing.T) 
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	cfg := &config.Config{}
 	cfg.Gateway.OpenAIWS.ErrorPayloadRetentionHours = 72
@@ -117,7 +117,7 @@ func TestApplyScheduleKeepsPayloadCleanupWhenMetadataCleanupDisabled(t *testing.
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	cfg := &config.Config{}
 	cfg.Gateway.OpenAIWS.ErrorPayloadRetentionHours = 72
 	cfg.Ops.Cleanup.Enabled = false

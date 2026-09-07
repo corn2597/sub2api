@@ -506,15 +506,13 @@ func (c *coderOpenAIWSClientConn) WriteJSON(ctx context.Context, value any) erro
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	release := func() {}
 	if c.largeLimiter != nil && c.largeThreshold > 0 {
 		large, err := openAIWSJSONExceedsThreshold(value, c.largeThreshold)
 		if err != nil {
 			return err
 		}
 		if large {
-			var acquireErr error
-			release, acquireErr = acquireOpenAIWSLargeMessage(ctx, c.largeLimiter)
+			release, acquireErr := acquireOpenAIWSLargeMessage(ctx, c.largeLimiter)
 			if acquireErr != nil {
 				return acquireErr
 			}
